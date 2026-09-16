@@ -1,5 +1,5 @@
 #! /usr/bin/env python3
-# GUI_Food.py - Food Expense & Photo Analysis Tracking GUI
+# GUI_Taylor.py - Expense & Photo Analysis Tracking GUI.  Food separate from monthly bill.
 # In the style of mySOC/SOC_Particle/pyStateOfCharge (Dave Gutz)
 #
 # Copyright (C) 2026 Dave Gutz
@@ -54,26 +54,31 @@ plat = sys.platform
 
 # Platform-specific paths
 if plat == "linux":
-    default_base_dir = "/home/daveg/gdrive/0 - Taylor/myTaylorFood"
+    default_base_dir = "/home/daveg/gdrive/0 - Taylor/myTaylorBill"
     default_log_dir = os.path.expanduser("~/.local")
 elif plat == "darwin":
-    default_base_dir = "/Users/daveg/Library/CloudStorage/GoogleDrive-davegutz2006@gmail.com/My Drive/0 - Taylor/myTaylorFood"
+    default_base_dir = "/Users/daveg/Library/CloudStorage/GoogleDrive-davegutz2006@gmail.com/My Drive/0 - Taylor/myTaylorBill"
     default_log_dir = os.path.expanduser("~/.local")
 else:
     local_app_data = os.getenv("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    default_base_dir = "G:/My Drive/0 - Taylor/myTaylorFood"
+    default_base_dir = "G:/My Drive/0 - Taylor/myTaylorBill"
     default_log_dir = str(Path(local_app_data) / "Temp")
 
 default_archive_dir = os.path.join(default_base_dir, "ArchiveFood")
+default_bill_archive_dir = os.path.join(default_base_dir, "ArchiveMonthlyBill")
 default_excel_path = os.path.join(default_base_dir, "TaylorMealRecords.xlsx")
 default_csv_path = os.path.join(default_base_dir, "TaylorMealRecords.csv")
+default_bill_excel_path = os.path.join(default_base_dir, "TaylorBillRecords.xlsx")
+default_bill_csv_path = os.path.join(default_base_dir, "TaylorBillRecords.csv")
 
 # Configuration default values
 default_dict = {
     "paths": {
         "base_folder": default_base_dir,
         "archive_folder": default_archive_dir,
+        "archive_monthly_bill": default_bill_archive_dir,
         "excel_path": default_excel_path,
+        "bill_excel_path": default_bill_excel_path,
         "last_photo_folder": default_base_dir,
         "last_photo": "",
     },
@@ -89,7 +94,7 @@ default_dict = {
     }
 }
 
-meal_types = ["Breakfast", "Lunch", "Dinner", "Snack", "Beverage", "Groceries", "Other"]
+meal_types = ["Breakfast", "Lunch", "Dinner", "Snack", "Beverage", "Groceries", "Monthly Bill", "Other"]
 
 
 # Begini - configuration manager using .ini files in style of mySOC
@@ -217,11 +222,14 @@ class FoodAnalyzerApp:
         self.current_photo_path = self.cf.get_item("paths", "last_photo", "")
         self.base_folder = self.cf.get_item("paths", "base_folder", default_base_dir)
         self.excel_path = self.cf.get_item("paths", "excel_path", default_excel_path)
+        self.bill_excel_path = self.cf.get_item("paths", "bill_excel_path", default_bill_excel_path)
         # Migrate any legacy gsheet reference in config
         if "records.gsheet" in self.excel_path:
             self.excel_path = default_excel_path
             self.cf.put_item("paths", "excel_path", self.excel_path)
 
+        self.current_doc_type = "Food"
+        self._cached_ocr = None
         self.meal_type_var = tk.StringVar(master, self.cf.get_item("options", "meal_type", "Breakfast"))
         
         self.tk_photo_image = None
@@ -236,7 +244,7 @@ class FoodAnalyzerApp:
             self.load_photo(self.current_photo_path, auto_analyze=False)
 
     def _build_gui(self):
-        self.master.title("Taylor Food Tracker & Receipt Analysis")
+        self.master.title("Taylor Tracker & Receipt Analysis")
         min_w = int(self.cf.get_item("preferences", "window_width", "1040"))
         min_h = int(self.cf.get_item("preferences", "window_height", "820"))
         self.master.geometry(f"{min_w}x{min_h}")
@@ -248,7 +256,7 @@ class FoodAnalyzerApp:
         title_frame.pack(fill="x", side="top")
         tk.Label(
             title_frame,
-            text="🥗 Taylor Food Receipt Analysis & Excel Records",
+            text="🥗 Taylor Receipt Analysis & Excel Records",
             font=("Arial bold", 14),
             fg="#ECF0F1",
             bg="#2C3E50"
@@ -305,15 +313,25 @@ class FoodAnalyzerApp:
         )
         open_folder_btn.pack(side="right", padx=3)
 
-        open_excel_btn = myButton(
+        self.btn_open_bill_excel = myButton(
             row2,
-            text="📊 Open Excel",
+            text="📊 Open Bill Excel",
+            command=self.open_bill_excel_file,
+            bg="#D0D3D4",
+            fg="#2471A3",
+            font=("Arial bold", 8)
+        )
+        self.btn_open_bill_excel.pack(side="right", padx=3)
+
+        self.btn_open_food_excel = myButton(
+            row2,
+            text="📊 Open Food Excel",
             command=self.open_excel_file,
             bg="#D0D3D4",
             fg="#1E8449",
             font=("Arial bold", 8)
         )
-        open_excel_btn.pack(side="right", padx=3)
+        self.btn_open_food_excel.pack(side="right", padx=3)
 
         # Action Buttons Panel (SOC style prominent buttons)
         action_frame = tk.Frame(self.master, bg="#BDC3C7", relief="ridge", bd=2, padx=10, pady=8)
@@ -355,10 +373,10 @@ class FoodAnalyzerApp:
         )
         self.btn_analyze.pack(side="left", padx=8)
 
-        # Action Button 3: Record to Excel
+        # Action Button 3: Record to Food
         self.btn_record = myButton(
             action_frame,
-            text="💾 3. Record to Excel",
+            text="💾 3. Record to Food",
             command=self.action_record_to_excel,
             bg="#8E44AD",
             fg="white",
@@ -390,7 +408,7 @@ class FoodAnalyzerApp:
         content_frame.pack(fill="both", expand=True, padx=10, pady=6)
 
         # Left Column: Photo Preview Canvas / Frame
-        left_box = tk.LabelFrame(content_frame, text=" Food Photo Preview ", font=self.label_font, bg=self.bg_color, padx=6, pady=6)
+        left_box = tk.LabelFrame(content_frame, text=" Photo Preview ", font=self.label_font, bg=self.bg_color, padx=6, pady=6)
         left_box.pack(side="left", fill="both", expand=True, padx=(0, 5))
 
         self.photo_info_lbl = tk.Label(
@@ -449,18 +467,18 @@ class FoodAnalyzerApp:
         self.entry_ref = tk.Entry(form_grid, font=("Arial", 10), width=26)
         self.entry_ref.grid(row=5, column=1, sticky="we", pady=2)
 
-        # Items Table Section (compact, ~1/2 size)
-        items_frame = tk.LabelFrame(right_box, text=" Items & Prices to Record in Excel ", font=self.label_font_gentle, bg=self.bg_color, padx=4, pady=2)
-        items_frame.pack(fill="x", pady=2)
+        # Items Table Section (compact)
+        self.items_frame = tk.LabelFrame(right_box, text=" Items & Prices to Record in Excel ", font=self.label_font_gentle, bg=self.bg_color, padx=4, pady=2)
+        self.items_frame.pack(fill="x", pady=2)
 
-        tree_scroll = tk.Scrollbar(items_frame)
+        tree_scroll = tk.Scrollbar(self.items_frame)
         tree_scroll.pack(side="right", fill="y")
 
         self.tree_items = ttk.Treeview(
-            items_frame,
+            self.items_frame,
             columns=("Item", "Price"),
             show="headings",
-            height=3,
+            height=5,
             yscrollcommand=tree_scroll.set
         )
         self.tree_items.heading("Item", text="Item (Dish / Food)")
@@ -527,6 +545,81 @@ class FoodAnalyzerApp:
             return p
         return "..." + p[-(max_len - 3):]
 
+    def _configure_treeview_for_doc_type(self, doc_type):
+        """Reconfigures Treeview columns based on whether a Bill or Food receipt is loaded."""
+        for item_id in self.tree_items.get_children():
+            self.tree_items.delete(item_id)
+
+        if doc_type == "Bill":
+            cols = ("Date", "Description", "Memo", "Notes", "Amount (negated)", "Amount")
+            self.tree_items.config(columns=cols)
+            self.tree_items.heading("Date", text="Date")
+            self.tree_items.heading("Description", text="Description")
+            self.tree_items.heading("Memo", text="Memo")
+            self.tree_items.heading("Notes", text="Notes")
+            self.tree_items.heading("Amount (negated)", text="Amount (negated)")
+            self.tree_items.heading("Amount", text="Amount")
+            self.tree_items.column("Date", width=85, minwidth=75, anchor="center")
+            self.tree_items.column("Description", width=140, minwidth=100, anchor="w")
+            self.tree_items.column("Memo", width=105, minwidth=80, anchor="w")
+            self.tree_items.column("Notes", width=145, minwidth=100, anchor="w")
+            self.tree_items.column("Amount (negated)", width=95, minwidth=80, anchor="e")
+            self.tree_items.column("Amount", width=85, minwidth=70, anchor="e")
+            if hasattr(self, "items_frame"):
+                self.items_frame.config(text=" Bill Items to Record in Bill Excel (GnuCash Format) ")
+        else:
+            cols = ("Item", "Price")
+            self.tree_items.config(columns=cols)
+            self.tree_items.heading("Item", text="Item (Dish / Food)")
+            self.tree_items.heading("Price", text="Price ($)")
+            self.tree_items.column("Item", width=250, minwidth=150, anchor="w")
+            self.tree_items.column("Price", width=80, minwidth=60, anchor="e")
+            if hasattr(self, "items_frame"):
+                self.items_frame.config(text=" Items & Prices to Record in Food Excel ")
+
+    def _detect_and_set_document_type(self, photo_path):
+        """Scans the document with OCR to determine if it is a 'Bill' or 'Food' receipt."""
+        doc_type = "Food"
+        if HAS_OCR and ocr_engine is not None:
+            try:
+                ocr_result, _ = ocr_engine(photo_path)
+                if ocr_result:
+                    self._cached_ocr = (photo_path, ocr_result)
+                    all_text = " ".join(t.strip() for _, t, _ in ocr_result).upper()
+                    bill_keywords = ["STATEMENT", "STATEMENT PERIOD", "ACCOUNT SUMMARY", "ACCOUNT DETAIL", "TOTAL DUE", "RENTCONCESSION", "MONTHLYFEEMBIL"]
+                    if any(kw in all_text for kw in bill_keywords):
+                        doc_type = "Bill"
+            except Exception as e:
+                self.log_status(f"Notice: document detection scan warning: {e}")
+
+        self.current_doc_type = doc_type
+        self._apply_document_type(doc_type)
+        return doc_type
+
+    def _apply_document_type(self, doc_type):
+        p = Path(self.current_photo_path) if self.current_photo_path else None
+        if doc_type == "Bill":
+            self.btn_record.config(text="💾 3. Record to Bill")
+            self._configure_treeview_for_doc_type("Bill")
+            self.meal_type_var.set("Monthly Bill")
+            if p and p.is_file():
+                self.log_status(f"Loaded photo: {p.name} (Identified as Bill). Click '2. Analyze Photo' to analyze.")
+                size_kb = p.stat().st_size / 1024.0
+                mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+                self.photo_info_lbl.config(
+                    text=f"Doc Type: Bill (Monthly Statement)\nFile: {p.name} ({size_kb:.1f} KB)\nModified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+        else:
+            self.btn_record.config(text="💾 3. Record to Food")
+            self._configure_treeview_for_doc_type("Food")
+            if p and p.is_file():
+                self.log_status(f"Loaded photo: {p.name} (Identified as Food). Click '2. Analyze Photo' to analyze.")
+                size_kb = p.stat().st_size / 1024.0
+                mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+                self.photo_info_lbl.config(
+                    text=f"Doc Type: Food Receipt\nFile: {p.name} ({size_kb:.1f} KB)\nModified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+
     def _check_folder_and_file_status(self):
         folder_exists = Path(self.base_folder).exists()
         if folder_exists:
@@ -534,7 +627,8 @@ class FoodAnalyzerApp:
         else:
             self.folder_status_lbl.config(bg="pink", text="MISS")
 
-        excel_exists = Path(self.excel_path).exists() and Path(self.excel_path).stat().st_size > 0
+        excel_target = self.bill_excel_path if getattr(self, "current_doc_type", "Food") == "Bill" else self.excel_path
+        excel_exists = Path(excel_target).exists() and Path(excel_target).stat().st_size > 0
         if excel_exists:
             self.excel_status_lbl.config(bg="lightgreen", text="OK")
         else:
@@ -708,12 +802,12 @@ class FoodAnalyzerApp:
             return False
 
     def open_excel_file(self):
-        """Opens the Excel records file in the default spreadsheet application, checking if already open first."""
+        """Opens the Food Excel records file in the default spreadsheet application, checking if already open first."""
         file_target = self.excel_path
         if not Path(file_target).exists() or Path(file_target).stat().st_size == 0:
             messagebox.showwarning(
                 "File Not Found",
-                f"Excel file does not exist yet:\n{file_target}\n\nPlease click '3. Record to Excel' to create and save records first."
+                f"Excel file does not exist yet:\n{file_target}\n\nPlease click '3. Record to Food' to create and save records first."
             )
             return
 
@@ -721,7 +815,32 @@ class FoodAnalyzerApp:
         if not self._check_and_prompt_if_excel_open(file_target, action_desc="open"):
             return
 
-        self.log_status(f"Opening Excel file: {os.path.basename(file_target)}")
+        self.log_status(f"Opening Food Excel file: {os.path.basename(file_target)}")
+        try:
+            if plat == "linux":
+                os.system(f'xdg-open "{file_target}" &')
+            elif plat == "darwin":
+                os.system(f'open "{file_target}" &')
+            else:
+                os.system(f'start "" "{file_target}"')
+        except Exception as e:
+            messagebox.showerror("Open Error", f"Could not open file:\n{file_target}\n{e}")
+
+    def open_bill_excel_file(self):
+        """Opens the Bill Excel records file in the default spreadsheet application, checking if already open first."""
+        file_target = self.cf.get_item("paths", "bill_excel_path", os.path.join(self.base_folder, "TaylorBillRecords.xlsx"))
+        if not Path(file_target).exists() or Path(file_target).stat().st_size == 0:
+            messagebox.showwarning(
+                "File Not Found",
+                f"Bill Excel file does not exist yet:\n{file_target}\n\nPlease click '3. Record to Bill' to create and save records first."
+            )
+            return
+
+        # Check if already open in Excel / spreadsheet app
+        if not self._check_and_prompt_if_excel_open(file_target, action_desc="open"):
+            return
+
+        self.log_status(f"Opening Bill Excel file: {os.path.basename(file_target)}")
         try:
             if plat == "linux":
                 os.system(f'xdg-open "{file_target}" &')
@@ -741,14 +860,14 @@ class FoodAnalyzerApp:
         self._watched_files = {}
         self._watcher_job = None
         self._collect_dependency_files()
-        # Hook up callback so internal .ini updates by GUI_Food don't trigger restart
+        # Hook up callback so internal .ini updates by GUI_Taylor don't trigger restart
         if hasattr(self, "cf"):
             self.cf.on_save_callback = self._on_internal_config_saved
         # Start periodic polling (every 1500 ms)
         self._watcher_job = self.master.after(1500, self._check_dependencies)
 
     def _on_internal_config_saved(self, config_path):
-        """Updates internal recorded mtime whenever GUI_Food itself writes to the .ini file,
+        """Updates internal recorded mtime whenever GUI_Taylor itself writes to the .ini file,
         preventing GUI actions from triggering a restart while keeping manual edits detected."""
         p = Path(config_path).resolve()
         if p.is_file() and hasattr(self, "_watched_files"):
@@ -895,7 +1014,7 @@ class FoodAnalyzerApp:
             if not Path(last_dir).exists():
                 last_dir = search_dir
             file_path = filedialog.askopenfilename(
-                title="Import Food Photo (None found in base folder)",
+                title="Import Photo (None found in base folder)",
                 initialdir=last_dir,
                 filetypes=[
                     ("Image Files", "*.jpg *.jpeg *.png *.webp *.bmp *.gif *.tiff *.heic *.JPG *.JPEG *.PNG *.WEBP *.BMP *.GIF *.TIFF *.HEIC"),
@@ -1007,20 +1126,16 @@ class FoodAnalyzerApp:
         mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
         size_kb = p.stat().st_size / 1024.0
 
-        self.photo_info_lbl.config(
-            text=f"File: {p.name} ({size_kb:.1f} KB)\nPath: {photo_path}\nModified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-
-        # Set default timestamp in form
-        self.entry_date.delete(0, tk.END)
-        self.entry_date.insert(0, mtime.strftime("%m/%d/%Y"))
-        self.entry_time.delete(0, tk.END)
-        self.entry_time.insert(0, mtime.strftime("%H:%M:%S"))
+        self.current_photo_path = photo_path
+        self.cf.put_item("paths", "last_photo", photo_path)
+        self.cf.put_item("paths", "last_photo_folder", str(p.parent))
 
         # Render photo on canvas
         self._render_photo_on_canvas(photo_path)
         self._highlight_clear_button(True)
-        self.log_status(f"Loaded photo: {p.name}. Click '2. Analyze Photo' or '🔄 Clear' to archive.")
+
+        # Detect and set document type ('Bill' or 'Food')
+        self._detect_and_set_document_type(photo_path)
 
         if auto_analyze:
             self.action_analyze_photo()
@@ -1324,14 +1439,22 @@ class FoodAnalyzerApp:
         }
 
     def action_analyze_photo(self):
-        """Action Button 2: Performs receipt text and photo analysis (OCR)."""
+        """Action Button 2: Performs document text and photo analysis (OCR) for Food or Bill."""
         if not self.current_photo_path or not Path(self.current_photo_path).is_file():
             messagebox.showwarning("No Photo", "Please import and load a photo first!")
             return
 
-        self.log_status("Running receipt text analysis (OCR)...")
+        doc_type = getattr(self, "current_doc_type", "Food")
+        self.log_status(f"Running {doc_type} text analysis (OCR)...")
         self.master.update_idletasks()
 
+        if doc_type == "Bill":
+            self._analyze_bill_photo()
+        else:
+            self._analyze_food_photo()
+
+    def _analyze_food_photo(self):
+        """Analyzes food receipt and populates receipt form and items tree."""
         parsed = self._parse_receipt_data(self.current_photo_path)
         
         # Populate Form Fields
@@ -1372,6 +1495,7 @@ class FoodAnalyzerApp:
         self.entry_ref.insert(0, parsed["Ref"])
 
         # Populate Items Treeview (formatted as $0.00)
+        self._configure_treeview_for_doc_type("Food")
         for item_id in self.tree_items.get_children():
             self.tree_items.delete(item_id)
 
@@ -1409,6 +1533,320 @@ class FoodAnalyzerApp:
         self.txt_analysis.insert("1.0", "\n".join(raw_text_display))
 
         self.log_status(f"Analysis complete: {len(self.parsed_items)} item(s) detected for {parsed['Individual']}.")
+
+    def _parse_bill_data(self, photo_path):
+        """Extracts monthly statement bill data according to specification:
+        - First column: 'Description'
+        - Second column: 'Memo' (Resident Name)
+        - Combined 4th & 5th columns: 'Notes' (Notes + Date/From)
+        - Last column: 'Amount (negated)' for Credits, 'Amount' for Charges
+        - Statement header info (Period, Print Date, Total Due)
+        """
+        p = Path(photo_path)
+        mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+
+        if not HAS_OCR or ocr_engine is None:
+            return {
+                "Individual": "David Gutz / Katherine Gutz",
+                "Total Due": "$0.00",
+                "Date": mtime.strftime("%m/%Y"),
+                "Print Date": mtime.strftime("%m/%d/%Y"),
+                "Ref": "Apt 304",
+                "items": [],
+                "raw_lines": ["(OCR engine not available)"]
+            }
+
+        if hasattr(self, "_cached_ocr") and self._cached_ocr and self._cached_ocr[0] == photo_path:
+            result = self._cached_ocr[1]
+        else:
+            result, _ = ocr_engine(photo_path)
+            self._cached_ocr = (photo_path, result)
+
+        if not result:
+            return {
+                "Individual": "David Gutz / Katherine Gutz",
+                "Total Due": "$0.00",
+                "Date": mtime.strftime("%m/%Y"),
+                "Print Date": mtime.strftime("%m/%d/%Y"),
+                "Ref": "Apt 304",
+                "items": [],
+                "raw_lines": ["(No text detected by OCR)"]
+            }
+
+        boxes = []
+        for b, text, score in result:
+            y = sum(pt[1] for pt in b) / 4.0
+            x = sum(pt[0] for pt in b) / 4.0
+            boxes.append({"text": text.strip(), "x": x, "y": y, "box": b})
+
+        # Statement Header metadata
+        statement_period = mtime.strftime("%m/%Y")
+        print_date = mtime.strftime("%m/%d/%Y")
+        total_due = "$0.00"
+
+        for b in boxes:
+            txt = b["text"]
+            if "Statement Period:" in txt:
+                statement_period = txt.split("Statement Period:")[-1].strip()
+            elif "Printdate:" in txt or "Print date:" in txt:
+                print_date = re.sub(r"Print\s*date:\s*", "", txt).strip()
+            elif "TOTAL DUE" in txt:
+                for b2 in boxes:
+                    if abs(b2["y"] - b["y"]) < 35 and "$" in b2["text"]:
+                        total_due = b2["text"].strip()
+                        break
+
+        # Derive 1st of month date from Statement Period (e.g. 09/2026 -> 09/01/2026)
+        statement_date = mtime.strftime("%m/01/%Y")
+        if statement_period:
+            m_dt = re.search(r'(\d{1,2})[/-](\d{2,4})', statement_period)
+            if m_dt:
+                m_num = int(m_dt.group(1))
+                y_num = int(m_dt.group(2))
+                if y_num < 100:
+                    y_num += 2000
+                if 1 <= m_num <= 12:
+                    statement_date = f"{m_num:02d}/01/{y_num:04d}"
+            else:
+                m_dt2 = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', statement_period)
+                if m_dt2:
+                    m_num = int(m_dt2.group(1))
+                    y_num = int(m_dt2.group(3))
+                    if y_num < 100:
+                        y_num += 2000
+                    if 1 <= m_num <= 12:
+                        statement_date = f"{m_num:02d}/01/{y_num:04d}"
+
+        # Find Y bounds for Credits and Charges in Account Detail
+        y_credits = None
+        y_tot_credits = None
+        y_charges = None
+        y_tot_charges = None
+
+        for b in boxes:
+            txt = b["text"]
+            if "Credits" in txt and b["y"] > 1800 and y_credits is None:
+                y_credits = b["y"]
+            elif "Total Credits" in txt or "TotalCredits" in txt:
+                y_tot_credits = b["y"]
+            elif "Charges" in txt and b["y"] > (y_tot_credits or 2200) and y_charges is None:
+                y_charges = b["y"]
+            elif "Total Charges" in txt or "TotalCharges" in txt:
+                y_tot_charges = b["y"]
+
+        def extract_section_lines(y_start, y_end):
+            sec = [b for b in boxes if y_start < b["y"] < y_end]
+            sec.sort(key=lambda b: b["y"])
+            lines = []
+            for b in sec:
+                if any(h in b["text"] for h in ["Quantity", "Resident Name", "From", "Credits", "Charges"]):
+                    continue
+                placed = False
+                for line in lines:
+                    avg_y = sum(x["y"] for x in line) / len(line)
+                    if abs(b["y"] - avg_y) < 45:
+                        line.append(b)
+                        placed = True
+                        break
+                if not placed:
+                    lines.append([b])
+            lines.sort(key=lambda l: sum(x["y"] for x in l) / len(l))
+            return lines
+
+        credit_lines = extract_section_lines(y_credits or 1950, y_tot_credits or 2350)
+        charge_lines = extract_section_lines(y_charges or 2400, y_tot_charges or 3350)
+
+        known_residents = ["David Gutz", "Katherine Gutz"]
+
+        def clean_name(t):
+            for r in known_residents:
+                if r.replace(" ", "").lower() in t.replace(" ", "").lower():
+                    return r
+            return t
+
+        def process_lines(raw_lines, is_credit):
+            rows = []
+            merged_lines = []
+            for line in raw_lines:
+                line.sort(key=lambda x: x["x"])
+                texts = [x["text"] for x in line]
+                if texts == ["IL"] and merged_lines:
+                    merged_lines[-1].append(line[0])
+                else:
+                    merged_lines.append(line)
+
+            for line in merged_lines:
+                line.sort(key=lambda x: x["x"])
+                col1_desc = []
+                col2_memo = []
+                col4_notes = []
+                col5_date = []
+                col6_amt = []
+
+                for b in line:
+                    x = b["x"]
+                    t = b["text"]
+                    if x < 600:
+                        split_found = False
+                        for r in known_residents:
+                            r_ns = r.replace(" ", "")
+                            if r_ns.lower() in t.lower():
+                                m = re.search(re.escape(r_ns), t, flags=re.IGNORECASE)
+                                if m:
+                                    d_part = t[:m.start()].strip()
+                                    n_part = r
+                                    if d_part:
+                                        col1_desc.append(d_part)
+                                    col2_memo.append(n_part)
+                                    split_found = True
+                                    break
+                        if not split_found:
+                            col1_desc.append(t)
+                    elif 600 <= x < 1100:
+                        col2_memo.append(clean_name(t))
+                    elif 1100 <= x < 1450:
+                        pass # Quantity ignored
+                    elif 1450 <= x < 1950:
+                        col4_notes.append(t)
+                    elif 1950 <= x < 2550:
+                        col5_date.append(t)
+                    else: # x >= 2550
+                        col6_amt.append(t)
+
+                desc = " ".join(col1_desc).strip()
+                if desc.startswith("IL "):
+                    desc = desc[3:].strip() + " IL"
+
+                memo = " ".join(col2_memo).strip()
+                memo = clean_name(memo)
+
+                notes_part = " ".join(col4_notes).strip()
+                date_part = " ".join(col5_date).strip()
+                comb_notes = f"{notes_part} {date_part}".strip() if notes_part and date_part else (notes_part or date_part)
+
+                amt_raw = " ".join(col6_amt).strip()
+                val_clean = amt_raw.replace("(", "").replace(")", "").replace("$", "").replace("（", "").replace("）", "").replace(",", "").strip()
+
+                if is_credit or "(" in amt_raw or "（" in amt_raw:
+                    rec = {
+                        "Date": statement_date,
+                        "Description": desc,
+                        "Memo": memo,
+                        "Notes": comb_notes,
+                        "Amount (negated)": val_clean,
+                        "Amount": "",
+                        "Raw Amount": amt_raw,
+                        "Type": "Credit"
+                    }
+                else:
+                    rec = {
+                        "Date": statement_date,
+                        "Description": desc,
+                        "Memo": memo,
+                        "Notes": comb_notes,
+                        "Amount (negated)": "",
+                        "Amount": val_clean,
+                        "Raw Amount": amt_raw,
+                        "Type": "Charge"
+                    }
+                rows.append(rec)
+            return rows
+
+        credits = process_lines(credit_lines, True)
+        charges = process_lines(charge_lines, False)
+
+        all_items = credits + charges
+        raw_lines = ["  |  ".join(b["text"] for b in line) for line in (credit_lines + charge_lines)]
+
+        return {
+            "Individual": "David Gutz / Katherine Gutz",
+            "Total Due": total_due,
+            "Date": statement_date,
+            "Statement Period": statement_period,
+            "Print Date": print_date,
+            "Ref": "Apt 304",
+            "credits": credits,
+            "charges": charges,
+            "items": all_items,
+            "raw_lines": raw_lines
+        }
+
+    def _analyze_bill_photo(self):
+        """Analyzes monthly statement bill and populates GnuCash-ready items table."""
+        parsed = self._parse_bill_data(self.current_photo_path)
+
+        # Populate Form Fields
+        self.entry_individual.delete(0, tk.END)
+        self.entry_individual.insert(0, parsed.get("Individual", "David Gutz / Katherine Gutz"))
+
+        self.entry_ind_balance.delete(0, tk.END)
+        self.entry_ind_balance.insert(0, parsed.get("Total Due", "$540.16"))
+
+        statement_date = parsed.get("Date", "09/01/2026")
+        self.entry_date.delete(0, tk.END)
+        self.entry_date.insert(0, statement_date)
+
+        self.meal_type_var.set("Monthly Bill")
+
+        self.entry_time.delete(0, tk.END)
+        self.entry_time.insert(0, parsed.get("Print Date", ""))
+
+        self.entry_ref.delete(0, tk.END)
+        self.entry_ref.insert(0, parsed.get("Ref", "Apt 304"))
+
+        # Populate Items Treeview
+        self._configure_treeview_for_doc_type("Bill")
+        all_items = parsed.get("items", [])
+        self.parsed_items = all_items
+
+        tot_credits = 0.0
+        tot_charges = 0.0
+        for it in all_items:
+            amt_neg = it.get("Amount (negated)", "")
+            amt_pos = it.get("Amount", "")
+            if amt_neg:
+                try:
+                    tot_credits += float(str(amt_neg).replace("$", "").replace(",", "").strip())
+                except ValueError:
+                    pass
+            if amt_pos:
+                try:
+                    tot_charges += float(str(amt_pos).replace("$", "").replace(",", "").strip())
+                except ValueError:
+                    pass
+
+            p_neg_display = f"(${float(amt_neg):.2f})" if amt_neg else ""
+            p_pos_display = f"${float(amt_pos):.2f}" if amt_pos else ""
+            self.tree_items.insert("", "end", values=(it.get("Date", statement_date), it["Description"], it["Memo"], it["Notes"], p_neg_display, p_pos_display))
+
+        net_due = tot_charges - tot_credits
+        self.lbl_items_summary.config(
+            text=f"{len(all_items)} Items | Credits: ${tot_credits:.2f} | Charges: ${tot_charges:.2f} | Net: ${net_due:.2f}"
+        )
+
+        # Show raw OCR summary in text area
+        self.txt_analysis.delete("1.0", tk.END)
+        self.txt_analysis.insert(tk.END, "=== MONTHLY BILL ANALYSIS (GNUCASH FORMAT) ===\n")
+        self.txt_analysis.insert(tk.END, f"Statement Date:   {statement_date}\n")
+        self.txt_analysis.insert(tk.END, f"Statement Period: {parsed.get('Statement Period', '')}\n")
+        self.txt_analysis.insert(tk.END, f"Print Date:       {parsed.get('Print Date', '')}\n")
+        self.txt_analysis.insert(tk.END, f"Resident(s):      {parsed.get('Individual', '')}\n")
+        self.txt_analysis.insert(tk.END, f"Total Due:        {parsed.get('Total Due', '')}\n\n")
+        self.txt_analysis.insert(tk.END, f"{'Date':<12} {'Description':<26} {'Memo':<18} {'Notes':<26} {'Amount (negated)':<18} {'Amount':<12}\n")
+        self.txt_analysis.insert(tk.END, "-" * 118 + "\n")
+        for it in all_items:
+            amt_neg = it.get("Amount (negated)", "")
+            amt_pos = it.get("Amount", "")
+            p_neg_str = f"(${float(amt_neg):.2f})" if amt_neg else ""
+            p_pos_str = f"${float(amt_pos):.2f}" if amt_pos else ""
+            self.txt_analysis.insert(tk.END, f"{it.get('Date', statement_date):<12} {it['Description']:<26} {it['Memo']:<18} {it['Notes']:<26} {p_neg_str:<18} {p_pos_str:<12}\n")
+        self.txt_analysis.insert(tk.END, "-" * 118 + "\n")
+        self.txt_analysis.insert(tk.END, f"Total Credits: ${tot_credits:.2f} | Total Charges: ${tot_charges:.2f} | Net Due: ${net_due:.2f}\n\n")
+        self.txt_analysis.insert(tk.END, "--- DETECTED STATEMENT LINES ---\n")
+        for line in parsed.get("raw_lines", []):
+            self.txt_analysis.insert(tk.END, line + "\n")
+
+        self.log_status(f"Analysis complete: {len(all_items)} bill item(s) detected. Total due: {parsed.get('Total Due', '')}")
 
     def _normalize_row_data(self, row):
         """Normalizes an Excel row into standard types and formatted strings with Date, Time, Meal as first columns."""
@@ -1622,20 +2060,18 @@ class FoodAnalyzerApp:
         return signatures
 
     def action_record_to_excel(self):
-        """Action Button 3: Records the parsed receipt properties into TaylorMealRecords.xlsx in Google Drive.
-        - Moves the entry's photo to the ArchiveFood folder (and removes it from the main folder)
-        - If there is a repeat entry (matching Ref, Photo Filename, or Individual+Date+Time), overwrites with the latest data
-        - Updates the recorded path to the photo in ArchiveFood
-        - Date (col 1), Time (col 2), Meal (col 3) as first columns
-        - Splits records into subsheets for each Individual (plus master 'All Records' sheet)
-        - Sorts all records by date & time (most recent first)
-        - Formats Price and Individual Balance as $0.00 currency
-        - Performs deduplication to eliminate repeated transactions
-        """
+        """Action Button 3: Records either Food receipt to TaylorMealRecords.xlsx or Bill to TaylorBillRecords.xlsx."""
         if not self.current_photo_path or not Path(self.current_photo_path).is_file():
             messagebox.showwarning("No Data", "Please import a photo and run analysis before recording.")
             return
 
+        if getattr(self, "current_doc_type", "Food") == "Bill":
+            self._record_bill_to_excel()
+        else:
+            self._record_food_to_excel()
+
+    def _record_food_to_excel(self):
+        """Records the parsed food receipt properties into TaylorMealRecords.xlsx and TaylorMealRecords.csv."""
         individual = self.entry_individual.get().strip().strip("- ").strip()
         ind_balance = self.entry_ind_balance.get().strip()
         rec_date = self.entry_date.get().strip()
@@ -1681,7 +2117,7 @@ class FoodAnalyzerApp:
                 self.current_photo_path = str(dest_path.resolve())
                 self.cf.put_item("paths", "last_photo", self.current_photo_path)
                 self.photo_info_lbl.config(
-                    text=f"File: {dest_path.name} (Archived)\nPath: {self.current_photo_path}\nModified: {rec_date} {rec_time}"
+                    text=f"Doc Type: Food Receipt (Archived)\nFile: {dest_path.name}\nPath: {self.current_photo_path}"
                 )
                 self.log_status(f"Moved photo to ArchiveFood: {dest_path.name}")
         except Exception as e:
@@ -1894,12 +2330,239 @@ class FoodAnalyzerApp:
             messagebox.showerror("Save Error", f"Failed to write record to Excel:\n{e}")
             self.log_status(f"Excel save error: {e}")
 
+    def _record_bill_to_excel(self):
+        """Records parsed bill entries into TaylorBillRecords.xlsx and TaylorBillRecords.csv (GnuCash format),
+        and moves the bill photo to ArchiveMonthlyBill.
+        """
+        try:
+            os.makedirs(self.base_folder, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror("Folder Error", f"Unable to create folder {self.base_folder}:\n{e}")
+            return
+
+        excel_target = Path(self.cf.get_item("paths", "bill_excel_path", os.path.join(self.base_folder, "TaylorBillRecords.xlsx"))).resolve()
+        csv_mirror = os.path.join(self.base_folder, "TaylorBillRecords.csv")
+
+        # 1. Move photo to ArchiveMonthlyBill folder and update path
+        archive_dir = Path(self.cf.get_item("paths", "archive_monthly_bill", os.path.join(self.base_folder, "ArchiveMonthlyBill"))).resolve()
+        try:
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            src_path = Path(self.current_photo_path).resolve()
+            if src_path.is_file() and src_path.parent != archive_dir:
+                dest_path = archive_dir / src_path.name
+                if dest_path.exists() and dest_path != src_path:
+                    dest_path.unlink()
+                shutil.move(str(src_path), str(dest_path))
+                self.current_photo_path = str(dest_path.resolve())
+                self.cf.put_item("paths", "last_photo", self.current_photo_path)
+                self.photo_info_lbl.config(
+                    text=f"Doc Type: Bill (Archived)\nFile: {dest_path.name}\nPath: {self.current_photo_path}"
+                )
+                self.log_status(f"Moved photo to ArchiveMonthlyBill: {dest_path.name}")
+        except Exception as e:
+            self.log_status(f"ArchiveMonthlyBill move warning: {e}")
+
+        # Extract items from treeview
+        headers = ["Date", "Description", "Memo", "Notes", "Amount (negated)", "Amount"]
+        items_to_save = []
+        for child in self.tree_items.get_children():
+            vals = self.tree_items.item(child, "values")
+            date_val = vals[0] if len(vals) > 0 else self.entry_date.get().strip()
+            desc = vals[1] if len(vals) > 1 else ""
+            memo = vals[2] if len(vals) > 2 else ""
+            notes = vals[3] if len(vals) > 3 else ""
+            amt_neg = vals[4].replace("(", "").replace(")", "").replace("$", "").replace(",", "").strip() if len(vals) > 4 else ""
+            amt_pos = vals[5].replace("$", "").replace(",", "").strip() if len(vals) > 5 else ""
+            items_to_save.append({
+                "Date": date_val,
+                "Description": desc,
+                "Memo": memo,
+                "Notes": notes,
+                "Amount (negated)": amt_neg,
+                "Amount": amt_pos
+            })
+        if not items_to_save and hasattr(self, "parsed_items") and self.parsed_items:
+            items_to_save = self.parsed_items
+            for item in items_to_save:
+                if "Date" not in item:
+                    item["Date"] = self.entry_date.get().strip()
+
+        if not items_to_save:
+            messagebox.showwarning("No Data", "No bill items to record.")
+            return
+
+        # Check if Excel file is open
+        if excel_target.exists() and not self._check_and_prompt_if_excel_open(str(excel_target), action_desc="overwrite"):
+            return
+
+        # Load existing rows if file exists
+        existing_rows = []
+        if HAS_OPENPYXL and excel_target.exists() and excel_target.stat().st_size > 0:
+            try:
+                wb_ex = openpyxl.load_workbook(str(excel_target), data_only=True)
+                if "All Records" in wb_ex.sheetnames:
+                    ws_ex = wb_ex["All Records"]
+                    header_row = [str(c or "") for c in next(ws_ex.iter_rows(min_row=1, max_row=1, values_only=True))]
+                    has_date_col = len(header_row) > 0 and "date" in header_row[0].lower()
+                    for row in ws_ex.iter_rows(min_row=2, values_only=True):
+                        if any(row):
+                            if has_date_col:
+                                existing_rows.append({
+                                    "Date": str(row[0] or ""),
+                                    "Description": str(row[1] or ""),
+                                    "Memo": str(row[2] or ""),
+                                    "Notes": str(row[3] or ""),
+                                    "Amount (negated)": str(row[4] or "") if len(row) > 4 and row[4] is not None else "",
+                                    "Amount": str(row[5] or "") if len(row) > 5 and row[5] is not None else ""
+                                })
+                            else:
+                                existing_rows.append({
+                                    "Date": self.entry_date.get().strip(),
+                                    "Description": str(row[0] or ""),
+                                    "Memo": str(row[1] or ""),
+                                    "Notes": str(row[2] or ""),
+                                    "Amount (negated)": str(row[3] or "") if len(row) > 3 and row[3] is not None else "",
+                                    "Amount": str(row[4] or "") if len(row) > 4 and row[4] is not None else ""
+                                })
+                wb_ex.close()
+            except Exception as e:
+                self.log_status(f"Notice: could not load existing Bill Excel rows: {e}")
+
+        # Combine and deduplicate
+        seen_keys = set()
+        combined = []
+        for r in (existing_rows + items_to_save):
+            key = (
+                r.get("Date", "").strip(),
+                r.get("Description", "").strip(),
+                r.get("Memo", "").strip(),
+                r.get("Notes", "").strip(),
+                str(r.get("Amount (negated)", "")).strip(),
+                str(r.get("Amount", "")).strip()
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            combined.append(r)
+
+        # Write Excel
+        if HAS_OPENPYXL:
+            wb = openpyxl.Workbook()
+            ws_all = wb.active
+            ws_all.title = "All Records"
+            self._write_bill_rows_to_worksheet(ws_all, "All Records", combined, headers)
+
+            # Subsheets for Credits and Charges
+            credit_rows = [r for r in combined if r["Amount (negated)"]]
+            if credit_rows:
+                ws_cr = wb.create_sheet(title="Credits")
+                self._write_bill_rows_to_worksheet(ws_cr, "Credits", credit_rows, headers)
+
+            charge_rows = [r for r in combined if r["Amount"]]
+            if charge_rows:
+                ws_ch = wb.create_sheet(title="Charges")
+                self._write_bill_rows_to_worksheet(ws_ch, "Charges", charge_rows, headers)
+
+            # Subsheet for each Memo (resident)
+            residents = sorted(list(set(r["Memo"] for r in combined if r["Memo"])))
+            for res_name in residents:
+                res_rows = [r for r in combined if r["Memo"] == res_name]
+                ws_res = wb.create_sheet(title=self._clean_sheet_name(res_name))
+                self._write_bill_rows_to_worksheet(ws_res, res_name, res_rows, headers)
+
+            wb.save(str(excel_target))
+
+        # Write CSV for GnuCash import
+        with open(csv_mirror, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            for r in combined:
+                writer.writerow([r.get("Date", ""), r.get("Description", ""), r.get("Memo", ""), r.get("Notes", ""), r.get("Amount (negated)", ""), r.get("Amount", "")])
+
+        self._highlight_clear_button(False)
+        self._check_folder_and_file_status()
+        self.log_status(f"Saved {len(items_to_save)} bill item(s) to {excel_target.name} and {os.path.basename(csv_mirror)}")
+
+        messagebox.showinfo(
+            "Bill Recorded",
+            f"Successfully recorded {len(items_to_save)} Bill Items to:\n{excel_target}\n\n"
+            f"GnuCash CSV Export:\n{csv_mirror}\n\n"
+            f"Photo Moved To:\n{self.current_photo_path}"
+        )
+
+    def _write_bill_rows_to_worksheet(self, ws, sheet_name, rows_data, headers):
+        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="1B4F72", end_color="1B4F72", fill_type="solid")
+        align_left = Alignment(horizontal="left", vertical="center")
+        align_right = Alignment(horizontal="right", vertical="center")
+        align_center = Alignment(horizontal="center", vertical="center")
+
+        ws.views.sheetView[0].showGridLines = True
+        ws.append(headers)
+        for col_idx in range(1, len(headers) + 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.font = header_font
+            cell.fill = header_fill
+            if "Amount" in headers[col_idx - 1]:
+                cell.alignment = align_right
+            elif headers[col_idx - 1] == "Date":
+                cell.alignment = align_center
+            else:
+                cell.alignment = align_left
+
+        for r_idx, r in enumerate(rows_data, start=2):
+            date_val = r.get("Date", "")
+            desc = r.get("Description", "")
+            memo = r.get("Memo", "")
+            notes = r.get("Notes", "")
+            amt_neg_val = ""
+            if r.get("Amount (negated)"):
+                try:
+                    amt_neg_val = float(str(r["Amount (negated)"]).replace("$", "").replace(",", "").strip())
+                except ValueError:
+                    amt_neg_val = r["Amount (negated)"]
+
+            amt_pos_val = ""
+            if r.get("Amount"):
+                try:
+                    amt_pos_val = float(str(r["Amount"]).replace("$", "").replace(",", "").strip())
+                except ValueError:
+                    amt_pos_val = r["Amount"]
+
+            ws.append([date_val, desc, memo, notes, amt_neg_val, amt_pos_val])
+            ws.cell(row=r_idx, column=1).alignment = align_center
+            ws.cell(row=r_idx, column=2).alignment = align_left
+            ws.cell(row=r_idx, column=3).alignment = align_left
+            ws.cell(row=r_idx, column=4).alignment = align_left
+            
+            c5 = ws.cell(row=r_idx, column=5)
+            c5.alignment = align_right
+            if isinstance(amt_neg_val, (int, float)):
+                c5.number_format = '"$"#,##0.00'
+
+            c6 = ws.cell(row=r_idx, column=6)
+            c6.alignment = align_right
+            if isinstance(amt_pos_val, (int, float)):
+                c6.number_format = '"$"#,##0.00'
+
+        # Auto-adjust column widths
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            col_letter = openpyxl.utils.get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max(max_len + 4, 14)
+
     def action_clear_all(self):
-        """Action Button 4: Clears the current photo, moves it to ArchiveFood, and blanks the screen ready for next import."""
-        # 1. If an image is currently loaded, move it to ArchiveFood
+        """Action Button 4: Clears the current photo, moves it to Archive (ArchiveFood or ArchiveMonthlyBill), and blanks the screen ready for next import."""
+        # 1. If an image is currently loaded, move it to appropriate Archive
         if self.current_photo_path and Path(self.current_photo_path).is_file():
             src_path = Path(self.current_photo_path).resolve()
-            archive_dir = Path(self.cf.get_item("paths", "archive_folder", os.path.join(self.base_folder, "ArchiveFood"))).resolve()
+            if getattr(self, "current_doc_type", "Food") == "Bill":
+                target_archive = self.cf.get_item("paths", "archive_monthly_bill", os.path.join(self.base_folder, "ArchiveMonthlyBill"))
+                archive_name = "ArchiveMonthlyBill"
+            else:
+                target_archive = self.cf.get_item("paths", "archive_folder", os.path.join(self.base_folder, "ArchiveFood"))
+                archive_name = "ArchiveFood"
+            archive_dir = Path(target_archive).resolve()
             try:
                 archive_dir.mkdir(parents=True, exist_ok=True)
                 if src_path.parent != archive_dir:
@@ -1907,9 +2570,9 @@ class FoodAnalyzerApp:
                     if dest_path.exists() and dest_path != src_path:
                         dest_path.unlink()
                     shutil.move(str(src_path), str(dest_path))
-                    self.log_status(f"Moved photo to ArchiveFood: {dest_path.name}")
+                    self.log_status(f"Moved photo to {archive_name}: {dest_path.name}")
             except Exception as e:
-                self.log_status(f"ArchiveFood move warning: {e}")
+                self.log_status(f"{archive_name} move warning: {e}")
 
         # 2. Blank the canvas / photo preview
         self.current_photo_path = ""
@@ -1944,7 +2607,7 @@ class FoodAnalyzerApp:
 def main():
     cf = Begini(__file__, default_dict)
 
-    master = tk.Tk(className="GUI_Food")
+    master = tk.Tk(className="GUI_Taylor")
     
     def on_closing():
         try:
