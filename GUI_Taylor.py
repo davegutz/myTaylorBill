@@ -267,7 +267,16 @@ class FoodAnalyzerApp:
         top_panel.pack(fill="x", padx=10, pady=6)
 
         # Row 1: Target Folder
-        row1 = tk.Frame(top_panel, bg=self.bg_color)
+        # Right side button grid (Export CSV row above Open Excel row)
+        right_panel = tk.Frame(top_panel, bg=self.bg_color)
+        right_panel.pack(side="right", padx=2)
+
+        # Left side path selectors
+        left_panel = tk.Frame(top_panel, bg=self.bg_color)
+        left_panel.pack(side="left", fill="x", expand=True)
+
+        # Row 1: Target Folder
+        row1 = tk.Frame(left_panel, bg=self.bg_color)
         row1.pack(fill="x", pady=2)
         tk.Label(row1, text="Google Drive Folder:", font=self.label_font, bg=self.bg_color, width=18, anchor="w").pack(side="left")
         self.folder_btn = myButton(
@@ -286,7 +295,7 @@ class FoodAnalyzerApp:
         self.folder_status_lbl.pack(side="left", padx=2)
 
         # Row 2: Excel Records File Path
-        row2 = tk.Frame(top_panel, bg=self.bg_color)
+        row2 = tk.Frame(left_panel, bg=self.bg_color)
         row2.pack(fill="x", pady=2)
         tk.Label(row2, text="Excel Records File:", font=self.label_font, bg=self.bg_color, width=18, anchor="w").pack(side="left")
         self.excel_btn = myButton(
@@ -304,34 +313,56 @@ class FoodAnalyzerApp:
         self.excel_status_lbl = tk.Label(row2, text="📊", font=self.label_font, bg="pink", width=3)
         self.excel_status_lbl.pack(side="left", padx=2)
 
-        open_folder_btn = myButton(
-            row2,
-            text="Open Folder",
-            command=self.open_base_folder_in_explorer,
+        # Row 0 of right_panel: Export CSV Buttons (directly above Open Excel buttons)
+        self.btn_export_food_csv = myButton(
+            right_panel,
+            text="Export Food csv",
+            command=self.action_export_food_csv,
             bg="#D0D3D4",
-            font=("Arial", 8)
+            fg="#1E8449",
+            font=("Arial bold", 8)
         )
-        open_folder_btn.pack(side="right", padx=3)
+        self.btn_export_food_csv.grid(row=0, column=0, padx=3, pady=2, sticky="ew")
 
-        self.btn_open_bill_excel = myButton(
-            row2,
-            text="📊 Open Bill Excel",
-            command=self.open_bill_excel_file,
+        self.btn_export_bill_csv = myButton(
+            right_panel,
+            text="Export Bill csv",
+            command=self.action_export_bill_csv,
             bg="#D0D3D4",
             fg="#2471A3",
             font=("Arial bold", 8)
         )
-        self.btn_open_bill_excel.pack(side="right", padx=3)
+        self.btn_export_bill_csv.grid(row=0, column=1, padx=3, pady=2, sticky="ew")
 
+        # Row 1 of right_panel: Open Excel Buttons & Open Folder
         self.btn_open_food_excel = myButton(
-            row2,
+            right_panel,
             text="📊 Open Food Excel",
             command=self.open_excel_file,
             bg="#D0D3D4",
             fg="#1E8449",
             font=("Arial bold", 8)
         )
-        self.btn_open_food_excel.pack(side="right", padx=3)
+        self.btn_open_food_excel.grid(row=1, column=0, padx=3, pady=2, sticky="ew")
+
+        self.btn_open_bill_excel = myButton(
+            right_panel,
+            text="📊 Open Bill Excel",
+            command=self.open_bill_excel_file,
+            bg="#D0D3D4",
+            fg="#2471A3",
+            font=("Arial bold", 8)
+        )
+        self.btn_open_bill_excel.grid(row=1, column=1, padx=3, pady=2, sticky="ew")
+
+        open_folder_btn = myButton(
+            right_panel,
+            text="Open Folder",
+            command=self.open_base_folder_in_explorer,
+            bg="#D0D3D4",
+            font=("Arial", 8)
+        )
+        open_folder_btn.grid(row=1, column=2, padx=3, pady=2, sticky="ew")
 
         # Action Buttons Panel (SOC style prominent buttons)
         action_frame = tk.Frame(self.master, bg="#BDC3C7", relief="ridge", bd=2, padx=10, pady=8)
@@ -850,6 +881,292 @@ class FoodAnalyzerApp:
                 os.system(f'start "" "{file_target}"')
         except Exception as e:
             messagebox.showerror("Open Error", f"Could not open file:\n{file_target}\n{e}")
+
+    def _extract_year_month(self, date_val):
+        """Extracts (year, month) tuple from datetime, date, or date string.
+        Returns (int, int) e.g. (2026, 9), or None if unparseable.
+        """
+        if isinstance(date_val, (datetime.datetime, datetime.date)):
+            return (date_val.year, date_val.month)
+        if not date_val:
+            return None
+        s = str(date_val).strip()
+        # Case 1: YYYY-MM-DD or YYYY/MM/DD
+        m = re.search(r'^(\d{4})[/-](\d{1,2})', s)
+        if m:
+            y, mo = int(m.group(1)), int(m.group(2))
+            if 1 <= mo <= 12:
+                return (y, mo)
+        # Case 2: MM/DD/YYYY or MM-DD-YYYY
+        m = re.search(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', s)
+        if m:
+            mo, y = int(m.group(1)), int(m.group(3))
+            if y < 100:
+                y += 2000
+            if 1 <= mo <= 12:
+                return (y, mo)
+        # Case 3: MM/YYYY or MM-YYYY
+        m = re.search(r'^(\d{1,2})[/-](\d{2,4})', s)
+        if m:
+            mo, y = int(m.group(1)), int(m.group(2))
+            if y < 100:
+                y += 2000
+            if 1 <= mo <= 12:
+                return (y, mo)
+        return None
+
+    def action_export_food_csv(self):
+        """Exports monthly CSV files from TaylorMealRecords.xlsx.
+        A separate CSV is exported for each month, including the date (YYYY-MM) in the filename.
+        """
+        excel_target = Path(self.excel_path).resolve()
+        if not excel_target.is_file() or excel_target.stat().st_size == 0:
+            messagebox.showwarning(
+                "File Not Found",
+                f"Food Excel file not found:\n{excel_target}\n\nPlease record receipts to Food Excel first."
+            )
+            return
+
+        if not HAS_OPENPYXL:
+            messagebox.showerror("Missing Library", "openpyxl is required to read Excel records.")
+            return
+
+        try:
+            wb = openpyxl.load_workbook(str(excel_target), data_only=True)
+            sheets_to_read = []
+            if "All Records" in wb.sheetnames:
+                sheets_to_read = [wb["All Records"]]
+            elif "Meal Records" in wb.sheetnames:
+                sheets_to_read = [wb["Meal Records"]]
+            else:
+                sheets_to_read = wb.worksheets
+
+            all_rows = []
+            for ws in sheets_to_read:
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    norm = self._normalize_row_data(row)
+                    if norm:
+                        all_rows.append(norm)
+            wb.close()
+        except Exception as e:
+            messagebox.showerror("Read Error", f"Failed to read Food Excel file:\n{e}")
+            return
+
+        if not all_rows:
+            messagebox.showinfo("No Data", "No food records found to export.")
+            return
+
+        # Deduplicate
+        deduped = []
+        seen = set()
+        for r in all_rows:
+            key = (str(r[5]).strip().lower(), str(r[0]).strip(), str(r[1]).strip(), str(r[3]).strip().lower(), str(r[4]).strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(r)
+
+        # Group by month (year, month)
+        grouped = {}
+        for r in deduped:
+            d_val = r[0]
+            ym = self._extract_year_month(d_val)
+            if ym is None:
+                ym = (1970, 1)
+            grouped.setdefault(ym, []).append(r)
+
+        headers = [
+            "Date", "Time", "Meal", "Item", "Price",
+            "Individual", "Individual Balance", "Ref",
+            "Photo Filename", "Photo Path"
+        ]
+
+        base_stem = excel_target.stem
+        created_files = []
+        total_rows_exported = 0
+
+        for (year, month) in sorted(grouped.keys()):
+            rows_for_month = grouped[(year, month)]
+            rows_for_month.sort(key=lambda r: self._parse_row_datetime(r[0], r[1]), reverse=True)
+
+            csv_filename = f"{base_stem}_{year:04d}-{month:02d}.csv"
+            csv_path = Path(self.base_folder) / csv_filename
+
+            try:
+                with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(headers)
+                    for r_data in rows_for_month:
+                        try:
+                            p_f = float(str(r_data[4]).replace("$", "").replace(",", "").strip())
+                            p_str = f"${p_f:.2f}"
+                        except (ValueError, TypeError):
+                            p_str = str(r_data[4])
+
+                        try:
+                            b_f = float(str(r_data[6]).replace("$", "").replace(",", "").strip())
+                            b_str = f"${b_f:.2f}"
+                        except (ValueError, TypeError):
+                            b_str = str(r_data[6])
+
+                        writer.writerow([
+                            r_data[0], r_data[1], r_data[2], r_data[3],
+                            p_str, r_data[5], b_str, r_data[7],
+                            r_data[8], r_data[9]
+                        ])
+                created_files.append(csv_path.name)
+                total_rows_exported += len(rows_for_month)
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to write {csv_path.name}:\n{e}")
+                return
+
+        self.log_status(f"Exported {total_rows_exported} food row(s) into {len(created_files)} CSV file(s): {', '.join(created_files)}")
+        messagebox.showinfo(
+            "Export Food CSV",
+            f"Successfully exported {total_rows_exported} record(s) into {len(created_files)} monthly CSV file(s):\n\n"
+            + "\n".join(f"• {name}" for name in created_files)
+            + f"\n\nLocation: {self.base_folder}"
+        )
+
+    def action_export_bill_csv(self):
+        """Exports monthly CSV files from TaylorBillRecords.xlsx (GnuCash compatible).
+        A separate CSV is exported for each month, including the date (YYYY-MM) in the filename.
+        """
+        excel_target = Path(self.cf.get_item("paths", "bill_excel_path", os.path.join(self.base_folder, "TaylorBillRecords.xlsx"))).resolve()
+        if not excel_target.is_file() or excel_target.stat().st_size == 0:
+            messagebox.showwarning(
+                "File Not Found",
+                f"Bill Excel file not found:\n{excel_target}\n\nPlease record bills to Bill Excel first."
+            )
+            return
+
+        if not HAS_OPENPYXL:
+            messagebox.showerror("Missing Library", "openpyxl is required to read Excel records.")
+            return
+
+        try:
+            wb = openpyxl.load_workbook(str(excel_target), data_only=True)
+            if "All Records" not in wb.sheetnames:
+                messagebox.showwarning("No Data", f"'All Records' sheet not found in {excel_target.name}.")
+                wb.close()
+                return
+
+            ws = wb["All Records"]
+            header_row = [str(c or "").strip() for c in next(ws.iter_rows(min_row=1, max_row=1, values_only=True))]
+            has_date = len(header_row) > 0 and "date" in header_row[0].lower()
+
+            all_rows = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if not any(row):
+                    continue
+                if has_date:
+                    d_val = row[0]
+                    desc = str(row[1] or "").strip()
+                    memo = str(row[2] or "").strip()
+                    notes = str(row[3] or "").strip()
+                    amt_neg = str(row[4] or "").strip() if len(row) > 4 and row[4] is not None else ""
+                    amt_pos = str(row[5] or "").strip() if len(row) > 5 and row[5] is not None else ""
+                else:
+                    d_val = self.entry_date.get().strip()
+                    desc = str(row[0] or "").strip()
+                    memo = str(row[1] or "").strip()
+                    notes = str(row[2] or "").strip()
+                    amt_neg = str(row[3] or "").strip() if len(row) > 3 and row[3] is not None else ""
+                    amt_pos = str(row[4] or "").strip() if len(row) > 4 and row[4] is not None else ""
+
+                if isinstance(d_val, (datetime.datetime, datetime.date)):
+                    date_str = d_val.strftime("%m/%d/%Y")
+                else:
+                    date_str = str(d_val or "").strip()
+
+                all_rows.append({
+                    "Date": date_str,
+                    "Description": desc,
+                    "Memo": memo,
+                    "Notes": notes,
+                    "Amount (negated)": amt_neg,
+                    "Amount": amt_pos
+                })
+            wb.close()
+        except Exception as e:
+            messagebox.showerror("Read Error", f"Failed to read Bill Excel file:\n{e}")
+            return
+
+        if not all_rows:
+            messagebox.showinfo("No Data", "No bill records found to export.")
+            return
+
+        # Deduplicate
+        deduped = []
+        seen = set()
+        for r in all_rows:
+            key = (r["Date"], r["Description"], r["Memo"], r["Notes"], str(r["Amount (negated)"]), str(r["Amount"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(r)
+
+        # Group by month
+        grouped = {}
+        for r in deduped:
+            ym = self._extract_year_month(r["Date"])
+            if ym is None:
+                ym = (1970, 1)
+            grouped.setdefault(ym, []).append(r)
+
+        headers = ["Date", "Description", "Memo", "Notes", "Amount (negated)", "Amount"]
+        base_stem = excel_target.stem
+        created_files = []
+        total_rows_exported = 0
+
+        for (year, month) in sorted(grouped.keys()):
+            rows_for_month = grouped[(year, month)]
+
+            csv_filename = f"{base_stem}_{year:04d}-{month:02d}.csv"
+            csv_path = Path(self.base_folder) / csv_filename
+
+            try:
+                with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(headers)
+                    for r in rows_for_month:
+                        amt_neg_str = ""
+                        if r["Amount (negated)"]:
+                            try:
+                                v = float(str(r["Amount (negated)"]).replace("$", "").replace(",", "").strip())
+                                amt_neg_str = f"{v:.2f}"
+                            except ValueError:
+                                amt_neg_str = str(r["Amount (negated)"])
+
+                        amt_pos_str = ""
+                        if r["Amount"]:
+                            try:
+                                v = float(str(r["Amount"]).replace("$", "").replace(",", "").strip())
+                                amt_pos_str = f"{v:.2f}"
+                            except ValueError:
+                                amt_pos_str = str(r["Amount"])
+
+                        writer.writerow([
+                            r["Date"],
+                            r["Description"],
+                            r["Memo"],
+                            r["Notes"],
+                            amt_neg_str,
+                            amt_pos_str
+                        ])
+                created_files.append(csv_path.name)
+                total_rows_exported += len(rows_for_month)
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to write {csv_path.name}:\n{e}")
+                return
+
+        self.log_status(f"Exported {total_rows_exported} bill row(s) into {len(created_files)} CSV file(s): {', '.join(created_files)}")
+        messagebox.showinfo(
+            "Export Bill CSV",
+            f"Successfully exported {total_rows_exported} bill record(s) into {len(created_files)} monthly CSV file(s) (GnuCash format):\n\n"
+            + "\n".join(f"• {name}" for name in created_files)
+            + f"\n\nLocation: {self.base_folder}"
+        )
 
     def log_status(self, msg):
         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -2102,7 +2419,6 @@ class FoodAnalyzerApp:
             return
 
         excel_target = self.excel_path
-        csv_mirror = os.path.join(self.base_folder, "TaylorMealRecords.csv")
 
         # 1. Move photo to ArchiveFood folder and update path
         archive_dir = Path(self.cf.get_item("paths", "archive_folder", os.path.join(self.base_folder, "ArchiveFood"))).resolve()
@@ -2279,37 +2595,6 @@ class FoodAnalyzerApp:
 
                 wb.save(excel_target)
             
-            # 7. Also write sorted CSV mirror
-            with open(csv_mirror, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(headers)
-                for r_data in deduped_rows:
-                    try:
-                        p_f = float(str(r_data[4]).replace("$", "").replace(",", "").strip())
-                        p_str = f"${p_f:.2f}"
-                    except (ValueError, TypeError):
-                        p_str = str(r_data[4])
-
-                    try:
-                        b_f = float(str(r_data[6]).replace("$", "").replace(",", "").strip())
-                        b_str = f"${b_f:.2f}"
-                    except (ValueError, TypeError):
-                        b_str = str(r_data[6])
-
-                    csv_row = [
-                        r_data[0],  # Date
-                        r_data[1],  # Time
-                        r_data[2],  # Meal
-                        r_data[3],  # Item
-                        p_str,      # Price
-                        r_data[5],  # Individual
-                        b_str,      # Individual Balance
-                        r_data[7],  # Ref
-                        r_data[8],  # Photo Filename
-                        r_data[9]   # Photo Path
-                    ]
-                    writer.writerow(csv_row)
-
             self._highlight_clear_button(False)
             self._check_folder_and_file_status()
             update_status_str = f"Updated (overwrote {overwritten_count} prior row(s))" if overwritten_count > 0 else f"Saved {len(new_entries)} new row(s)"
@@ -2341,7 +2626,6 @@ class FoodAnalyzerApp:
             return
 
         excel_target = Path(self.cf.get_item("paths", "bill_excel_path", os.path.join(self.base_folder, "TaylorBillRecords.xlsx"))).resolve()
-        csv_mirror = os.path.join(self.base_folder, "TaylorBillRecords.csv")
 
         # 1. Move photo to ArchiveMonthlyBill folder and update path
         archive_dir = Path(self.cf.get_item("paths", "archive_monthly_bill", os.path.join(self.base_folder, "ArchiveMonthlyBill"))).resolve()
@@ -2472,21 +2756,13 @@ class FoodAnalyzerApp:
 
             wb.save(str(excel_target))
 
-        # Write CSV for GnuCash import
-        with open(csv_mirror, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
-            for r in combined:
-                writer.writerow([r.get("Date", ""), r.get("Description", ""), r.get("Memo", ""), r.get("Notes", ""), r.get("Amount (negated)", ""), r.get("Amount", "")])
-
         self._highlight_clear_button(False)
         self._check_folder_and_file_status()
-        self.log_status(f"Saved {len(items_to_save)} bill item(s) to {excel_target.name} and {os.path.basename(csv_mirror)}")
+        self.log_status(f"Saved {len(items_to_save)} bill item(s) to {excel_target.name}")
 
         messagebox.showinfo(
             "Bill Recorded",
             f"Successfully recorded {len(items_to_save)} Bill Items to:\n{excel_target}\n\n"
-            f"GnuCash CSV Export:\n{csv_mirror}\n\n"
             f"Photo Moved To:\n{self.current_photo_path}"
         )
 
