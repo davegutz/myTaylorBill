@@ -137,6 +137,12 @@ class Begini(ConfigParser):
                 old_lp = self.get("paths", "last_photo")
                 if "/Archive/" in old_lp or "\\Archive\\" in old_lp:
                     self.set("paths", "last_photo", old_lp.replace("/Archive/", "/ArchiveFood/").replace("\\Archive\\", "\\ArchiveFood\\"))
+            # Migrate legacy myTaylorFood paths to myTaylorBill
+            for opt in ["base_folder", "archive_folder", "excel_path", "bill_excel_path", "last_photo_folder", "last_photo"]:
+                if self.has_option("paths", opt):
+                    old_v = self.get("paths", opt)
+                    if "myTaylorFood" in old_v:
+                        self.set("paths", opt, old_v.replace("myTaylorFood", "myTaylorBill"))
             for sec, kv in default_dict_.items():
                 if not self.has_section(sec):
                     self.add_section(sec)
@@ -677,6 +683,8 @@ class FoodAnalyzerApp:
         if new_folder:
             self.base_folder = new_folder
             self.cf.put_item("paths", "base_folder", new_folder)
+            self.cf.put_item("paths", "archive_folder", os.path.join(new_folder, "ArchiveFood"))
+            self.cf.put_item("paths", "archive_monthly_bill", os.path.join(new_folder, "ArchiveMonthlyBill"))
             self.folder_btn.config(text=self._shorten_path(new_folder, 45))
             self._check_folder_and_file_status()
             self.log_status(f"Updated base folder: {new_folder}")
@@ -2537,29 +2545,11 @@ class FoodAnalyzerApp:
 
         combined_rows = kept_rows + new_entries
 
-        # 4. Table-wide Deduplication Pass: Ensure no identical or repeat records remain
-        deduped_rows = []
-        seen_keys = set()
-        for r in combined_rows:
-            r_date = str(r[0] or "").strip()
-            r_time = str(r[1] or "").strip()
-            r_item = str(r[3] or "").strip().lower()
-            try:
-                r_price_val = f"{float(r[4]):.2f}"
-            except Exception:
-                r_price_val = str(r[4])
-            r_ind = str(r[5] or "").strip().lower()
-            r_ref = str(r[7] or "").strip()
-
-            # Unique key combination for each item entry
-            key = (r_ind, r_date, r_time, r_item, r_price_val)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            deduped_rows.append(r)
+        # 4. Prepare combined rows (Step 3 already handled overwriting prior records of this receipt)
+        final_rows = list(combined_rows)
 
         # 5. Sort all rows by Date & Time: most recent first (descending)
-        deduped_rows.sort(key=lambda r: self._parse_row_datetime(r[0], r[1]), reverse=True)
+        final_rows.sort(key=lambda r: self._parse_row_datetime(r[0], r[1]), reverse=True)
 
         # Check if Excel file is already open in another process before saving
         if Path(excel_target).exists() and not self._check_and_prompt_if_excel_open(excel_target, action_desc="overwrite"):
@@ -2572,11 +2562,11 @@ class FoodAnalyzerApp:
                 
                 # 6a. Main / Master sheet: "All Records"
                 ws_all = wb.active
-                self._write_rows_to_worksheet(ws_all, "All Records", deduped_rows, headers)
+                self._write_rows_to_worksheet(ws_all, "All Records", final_rows, headers)
 
                 # 6b. Individual subsheets: Distinct worksheet for each individual
                 individuals_found = []
-                for r in deduped_rows:
+                for r in final_rows:
                     ind_n = str(r[5] or "").strip()
                     if ind_n and ind_n not in individuals_found:
                         individuals_found.append(ind_n)
@@ -2585,7 +2575,7 @@ class FoodAnalyzerApp:
                 individuals_found.sort(key=lambda s: s.lower())
 
                 for ind_name in individuals_found:
-                    ind_rows = [r for r in deduped_rows if str(r[5] or "").strip().lower() == ind_name.lower()]
+                    ind_rows = [r for r in final_rows if str(r[5] or "").strip().lower() == ind_name.lower()]
                     sheet_title = self._clean_sheet_name(ind_name)
                     if sheet_title in wb.sheetnames:
                         ws_ind = wb[sheet_title]
