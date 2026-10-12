@@ -1467,17 +1467,10 @@ class FoodAnalyzerApp:
             )
 
     def _update_load_button_state(self):
-        """Updates '1. Load' button state based on whether a photo is currently loaded and unanalyzed."""
+        """Updates '1. Load' button state: kept active so user can load or skip/move on to the next photo at any time."""
         if not hasattr(self, "btn_import"):
             return
-        if not (self.current_photo_path and Path(self.current_photo_path).is_file()):
-            self._set_load_button_state(enabled=True)
-            return
-        # If a photo is loaded and analysis is available (3. Record ready), ungrey Load
-        if self._has_analysis_to_record():
-            self._set_load_button_state(enabled=True)
-        else:
-            self._set_load_button_state(enabled=False)
+        self._set_load_button_state(enabled=True)
 
     def _set_analyze_button_state(self, enabled=True):
         """Sets the state of '2. Analyze Photo' button: green and active if enabled, greyed out if disabled."""
