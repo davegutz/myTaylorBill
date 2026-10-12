@@ -27,11 +27,18 @@ from tkinter import filedialog, messagebox, ttk
 # Optional PIL support for robust image handling
 try:
     from PIL import Image, ImageTk, ImageOps
-    import numpy as np
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
+
+try:
+    import numpy as np
+except ImportError:
     np = None
+
+# Preserve system Qt environment variables before importing OpenCV / OCR
+_orig_qt_plugin_path = os.environ.get("QT_QPA_PLATFORM_PLUGIN_PATH")
+_orig_qt_fontdir = os.environ.get("QT_QPA_FONTDIR")
 
 # Optional RapidOCR support for reading receipt text
 try:
@@ -41,6 +48,20 @@ try:
 except ImportError:
     HAS_OCR = False
     ocr_engine = None
+
+# OpenCV (cv2) automatically overrides QT_QPA_PLATFORM_PLUGIN_PATH and QT_QPA_FONTDIR
+# with its bundled virtualenv Qt plugins. On Linux, this breaks external desktop applications
+# (such as LibreOffice Calc launched via xdg-open) because they try to load cv2's incompatible Qt plugins.
+# Clean them up immediately so system desktop applications work correctly.
+if _orig_qt_plugin_path is None:
+    os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+else:
+    os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _orig_qt_plugin_path
+
+if _orig_qt_fontdir is None:
+    os.environ.pop("QT_QPA_FONTDIR", None)
+else:
+    os.environ["QT_QPA_FONTDIR"] = _orig_qt_fontdir
 
 # Optional openpyxl for Excel workbook handling
 try:
@@ -225,7 +246,7 @@ class FoodAnalyzerApp:
         self.note_font = ("Arial italic", 9)
         self.header_font = ("Arial bold", 13)
 
-        self.current_photo_path = self.cf.get_item("paths", "last_photo", "")
+        self.current_photo_path = ""
         self.base_folder = self.cf.get_item("paths", "base_folder", default_base_dir)
         self.excel_path = self.cf.get_item("paths", "excel_path", default_excel_path)
         self.bill_excel_path = self.cf.get_item("paths", "bill_excel_path", default_bill_excel_path)
@@ -246,8 +267,20 @@ class FoodAnalyzerApp:
         self._check_folder_and_file_status()
         self._init_dependency_watcher()
 
-        if self.current_photo_path and Path(self.current_photo_path).is_file():
-            self.load_photo(self.current_photo_path, auto_analyze=False)
+        # On startup, try to reload a new image from the main drive folder. If none found, leave display blank.
+        startup_photo = self._find_oldest_photo_in_base_folder()
+        if startup_photo:
+            self.load_photo(startup_photo, auto_analyze=False)
+        else:
+            self.current_photo_path = ""
+            self._current_pil_image = None
+            self.tk_photo_image = None
+            self.image_canvas.delete("all")
+            self.photo_info_lbl.config(text="No photo loaded. Click '1. Load' above.")
+            self._highlight_clear_button(False)
+            self._update_load_button_state()
+            self._set_analyze_button_state(enabled=False)
+            self._set_record_button_state(enabled=False)
 
     def _build_gui(self):
         self.master.title("Taylor Tracker & Receipt Analysis")
@@ -376,10 +409,10 @@ class FoodAnalyzerApp:
 
         tk.Label(action_frame, text="ACTIONS:", font=self.label_font, bg="#BDC3C7").pack(side="left", padx=5)
 
-        # Action Button 1: Import
+        # Action Button 1: Load
         self.btn_import = myButton(
             action_frame,
-            text="📷 1. Import",
+            text="📷 1. Load",
             command=self.action_import_photo,
             bg="#2980B9",
             fg="white",
@@ -415,14 +448,14 @@ class FoodAnalyzerApp:
             action_frame,
             text="💾 3. Record to Food",
             command=self.action_record_to_excel,
-            bg="#8E44AD",
-            fg="white",
-            activebackground="#9B59B6",
-            activeforeground="white",
+            bg="#BDC3C7",
+            fg="#7F8C8D",
+            disabledforeground="#7F8C8D",
+            state="disabled",
+            relief="groove",
             font=self.butt_font_large,
             padx=12,
             pady=6,
-            relief="raised",
             bd=3
         )
         self.btn_record.pack(side="left", padx=8)
@@ -582,12 +615,18 @@ class FoodAnalyzerApp:
             return p
         return "..." + p[-(max_len - 3):]
 
+    def is_bill(self):
+        """Returns True if the current loaded document is a Monthly Bill."""
+        doc_type = getattr(self, "current_doc_type", "Food")
+        meal_val = self.meal_type_var.get() if hasattr(self, "meal_type_var") else ""
+        return doc_type in ("MonthlyBill", "Bill") or meal_val == "Monthly Bill"
+
     def _configure_treeview_for_doc_type(self, doc_type):
         """Reconfigures Treeview columns based on whether a Bill or Food receipt is loaded."""
         for item_id in self.tree_items.get_children():
             self.tree_items.delete(item_id)
 
-        if doc_type == "Bill":
+        if doc_type in ("MonthlyBill", "Bill"):
             cols = ("Date", "Description", "Memo", "Notes", "Amount (negated)", "Amount")
             self.tree_items.config(columns=cols)
             self.tree_items.heading("Date", text="Date")
@@ -615,7 +654,7 @@ class FoodAnalyzerApp:
                 self.items_frame.config(text=" Items & Prices to Record in Food Excel ")
 
     def _detect_and_set_document_type(self, photo_path):
-        """Scans the document with OCR to determine if it is a 'Bill' or 'Food' receipt."""
+        """Scans the document with OCR to determine if it is a 'MonthlyBill' or 'Food' receipt."""
         doc_type = "Food"
         if HAS_OCR and ocr_engine is not None:
             try:
@@ -623,9 +662,9 @@ class FoodAnalyzerApp:
                 if ocr_result:
                     self._cached_ocr = (photo_path, ocr_result)
                     all_text = " ".join(t.strip() for _, t, _ in ocr_result).upper()
-                    bill_keywords = ["STATEMENT", "STATEMENT PERIOD", "ACCOUNT SUMMARY", "ACCOUNT DETAIL", "TOTAL DUE", "RENTCONCESSION", "MONTHLYFEEMBIL"]
+                    bill_keywords = ["STATEMENT", "STATEMENT PERIOD", "STATEMENTPERIOD", "ACCOUNT SUMMARY", "ACCOUNT DETAIL", "TOTAL DUE", "RENTCONCESSION", "MONTHLYFEEMBIL"]
                     if any(kw in all_text for kw in bill_keywords):
-                        doc_type = "Bill"
+                        doc_type = "MonthlyBill"
             except Exception as e:
                 self.log_status(f"Notice: document detection scan warning: {e}")
 
@@ -635,37 +674,56 @@ class FoodAnalyzerApp:
 
     def _apply_document_type(self, doc_type):
         p = Path(self.current_photo_path) if self.current_photo_path else None
-        if doc_type == "Bill":
-            self.btn_record.config(text="💾 3. Record to Bill")
+        has_photo = bool(p and p.is_file())
+        if doc_type in ("MonthlyBill", "Bill"):
+            # Grey out analyze button for Monthly Bill
+            self._set_analyze_button_state(enabled=False)
+            # Enable Record to Monthly Bill if photo is loaded
+            self._set_record_button_state(enabled=has_photo, doc_type="MonthlyBill")
             self._configure_treeview_for_doc_type("Bill")
             self.meal_type_var.set("Monthly Bill")
-            if p and p.is_file():
-                self.log_status(f"Loaded photo: {p.name} (Identified as Bill). Click '2. Analyze Photo' to analyze.")
-                size_kb = p.stat().st_size / 1024.0
-                mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
-                self.photo_info_lbl.config(
-                    text=f"Doc Type: Bill (Monthly Statement)\nFile: {p.name} ({size_kb:.1f} KB)\nModified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+            if has_photo:
+                self.log_status(f"Loaded photo: {p.name} (Identified as Monthly Bill). Click '3. Record to Monthly Bill' to file.")
+                try:
+                    size_kb = p.stat().st_size / 1024.0
+                    mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+                    self.photo_info_lbl.config(
+                        text=f"Doc Type: Monthly Bill (Statement)\nFile: {p.name} ({size_kb:.1f} KB)\nModified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                except OSError:
+                    self.photo_info_lbl.config(text=f"Doc Type: Monthly Bill\nFile: {p.name} (unreachable)")
         else:
-            self.btn_record.config(text="💾 3. Record to Food")
+            # Food receipt: enable Analyze button only if photo is loaded
+            self._set_analyze_button_state(enabled=has_photo)
+            # Grey out Record to Food if there is no analysis available yet
+            self._set_record_button_state(enabled=self._has_analysis_to_record(), doc_type="Food")
             self._configure_treeview_for_doc_type("Food")
             if p and p.is_file():
-                self.log_status(f"Loaded photo: {p.name} (Identified as Food). Click '2. Analyze Photo' to analyze.")
-                size_kb = p.stat().st_size / 1024.0
-                mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
-                self.photo_info_lbl.config(
-                    text=f"Doc Type: Food Receipt\nFile: {p.name} ({size_kb:.1f} KB)\nModified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                self.log_status(f"Loaded photo: {p.name} (Identified as Food Receipt). Click '2. Analyze Photo' to analyze.")
+                try:
+                    size_kb = p.stat().st_size / 1024.0
+                    mtime = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+                    self.photo_info_lbl.config(
+                        text=f"Doc Type: Food Receipt\nFile: {p.name} ({size_kb:.1f} KB)\nModified: {mtime.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                except OSError:
+                    self.photo_info_lbl.config(text=f"Doc Type: Food Receipt\nFile: {p.name} (unreachable)")
 
     def _check_folder_and_file_status(self):
-        folder_exists = Path(self.base_folder).exists()
+        try:
+            folder_exists = Path(self.base_folder).exists()
+        except OSError:
+            folder_exists = False
         if folder_exists:
             self.folder_status_lbl.config(bg="lightgreen", text="OK")
         else:
             self.folder_status_lbl.config(bg="pink", text="MISS")
 
-        excel_target = self.bill_excel_path if getattr(self, "current_doc_type", "Food") == "Bill" else self.excel_path
-        excel_exists = Path(excel_target).exists() and Path(excel_target).stat().st_size > 0
+        excel_target = self.bill_excel_path if self.is_bill() else self.excel_path
+        try:
+            excel_exists = Path(excel_target).exists() and Path(excel_target).stat().st_size > 0
+        except OSError:
+            excel_exists = False
         if excel_exists:
             self.excel_status_lbl.config(bg="lightgreen", text="OK")
         else:
@@ -674,6 +732,15 @@ class FoodAnalyzerApp:
     def _on_meal_type_change(self, *args):
         val = self.meal_type_var.get()
         self.cf.put_item("options", "meal_type", val)
+        if val == "Monthly Bill":
+            if getattr(self, "current_doc_type", "Food") not in ("MonthlyBill", "Bill"):
+                self.current_doc_type = "MonthlyBill"
+                self._apply_document_type("MonthlyBill")
+        else:
+            if self.is_bill():
+                self.current_doc_type = "Food"
+                self._apply_document_type("Food")
+        self._check_folder_and_file_status()
 
     def select_base_folder(self):
         new_folder = filedialog.askdirectory(
@@ -703,6 +770,35 @@ class FoodAnalyzerApp:
             self._check_folder_and_file_status()
             self.log_status(f"Updated Excel records file path: {new_path}")
 
+    def _launch_external(self, target_path):
+        """Launches a file or directory using the system default application,
+        ensuring OpenCV's bundled Qt variables do not corrupt desktop apps like LibreOffice.
+        """
+        env = os.environ.copy()
+        for var in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_QPA_FONTDIR"):
+            val = env.get(var, "")
+            if "cv2" in val or "site-packages" in val:
+                env.pop(var, None)
+
+        if plat == "linux":
+            subprocess.Popen(
+                ["xdg-open", str(target_path)],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        elif plat == "darwin":
+            subprocess.Popen(
+                ["open", str(target_path)],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        else:
+            os.system(f'start "" "{target_path}"')
+
     def open_base_folder_in_explorer(self):
         folder = self.base_folder
         if not Path(folder).exists():
@@ -712,12 +808,10 @@ class FoodAnalyzerApp:
                 messagebox.showerror("Error", f"Could not create folder:\n{folder}\n{e}")
                 return
 
-        if plat == "linux":
-            os.system(f'xdg-open "{folder}" &')
-        elif plat == "darwin":
-            os.system(f'open "{folder}" &')
-        else:
-            os.system(f'explorer "{folder}"')
+        try:
+            self._launch_external(folder)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open folder:\n{folder}\n{e}")
 
     def _get_pids_locking_file(self, file_path):
         """Discovers process IDs currently holding or locking file_path."""
@@ -745,28 +839,34 @@ class FoodAnalyzerApp:
 
     def _is_file_open_in_process(self, file_path):
         """Checks if a file is currently open in Excel or another program."""
-        p = Path(file_path).resolve()
-        if not p.is_file():
-            return False, []
-
-        # 1. Check for standard Office / LibreOffice lock files
-        lock_libre = p.parent / f".~lock.{p.name}#"
-        lock_excel = p.parent / f"~${p.name}"
-        if lock_libre.exists() or lock_excel.exists():
-            pids = self._get_pids_locking_file(str(p))
-            return True, pids
-
-        # 2. Check active OS locking PIDs
-        pids = self._get_pids_locking_file(str(p))
-        if pids:
-            return True, pids
-
-        # 3. Test exclusive file access
         try:
-            with open(str(p), "r+b"):
-                pass
-        except (PermissionError, IOError):
-            return True, []
+            p = Path(file_path).resolve()
+            if not p.is_file():
+                return False, []
+
+            # 1. Check for standard Office / LibreOffice lock files
+            lock_libre = p.parent / f".~lock.{p.name}#"
+            lock_excel = p.parent / f"~${p.name}"
+            if lock_libre.exists() or lock_excel.exists():
+                pids = self._get_pids_locking_file(str(p))
+                return True, pids
+
+            # 2. Check active OS locking PIDs (fuser, lsof on Linux/macOS)
+            pids = self._get_pids_locking_file(str(p))
+            if pids:
+                return True, pids
+
+            # 3. Test exclusive file access only on Windows (where Excel holds mandatory locks).
+            # On Linux/macOS, opening with r+b does not detect other apps and causes false positives
+            # on cloud/FUSE mounts (such as rclone or Google Drive).
+            if plat == "win32":
+                try:
+                    with open(str(p), "r+b"):
+                        pass
+                except (PermissionError, IOError):
+                    return True, []
+        except (OSError, ValueError):
+            return False, []
 
         return False, []
 
@@ -856,12 +956,7 @@ class FoodAnalyzerApp:
 
         self.log_status(f"Opening Food Excel file: {os.path.basename(file_target)}")
         try:
-            if plat == "linux":
-                os.system(f'xdg-open "{file_target}" &')
-            elif plat == "darwin":
-                os.system(f'open "{file_target}" &')
-            else:
-                os.system(f'start "" "{file_target}"')
+            self._launch_external(file_target)
         except Exception as e:
             messagebox.showerror("Open Error", f"Could not open file:\n{file_target}\n{e}")
 
@@ -881,12 +976,7 @@ class FoodAnalyzerApp:
 
         self.log_status(f"Opening Bill Excel file: {os.path.basename(file_target)}")
         try:
-            if plat == "linux":
-                os.system(f'xdg-open "{file_target}" &')
-            elif plat == "darwin":
-                os.system(f'open "{file_target}" &')
-            else:
-                os.system(f'start "" "{file_target}"')
+            self._launch_external(file_target)
         except Exception as e:
             messagebox.showerror("Open Error", f"Could not open file:\n{file_target}\n{e}")
 
@@ -1298,48 +1388,186 @@ class FoodAnalyzerApp:
         args = [python_exe] + sys.argv
         os.execv(python_exe, args)
 
-    def action_import_photo(self):
-        """Action Button 1: Automatically picks the oldest photo from the base folder,
-        saves a copy to the ArchiveFood folder, and loads it for analysis (without OCR).
-        If no photos are found in the base folder, falls back to a file picker dialog.
-        """
-        search_dir = self.base_folder
-        if not Path(search_dir).exists():
+    def _refresh_rclone_mount(self):
+        """Notifies rclone mount to flush directory cache so newly added remote files appear immediately."""
+        if plat == "linux":
             try:
-                os.makedirs(search_dir, exist_ok=True)
-            except Exception as e:
-                messagebox.showerror("Folder Error", f"Cannot access folder:\n{search_dir}\n{e}")
-                return
+                if shutil.which("pkill"):
+                    subprocess.run(["pkill", "-HUP", "-f", "rclone mount"], capture_output=True, timeout=2)
+                elif shutil.which("pidof"):
+                    res = subprocess.run(["pidof", "rclone"], capture_output=True, text=True, timeout=2)
+                    for pid_str in res.stdout.split():
+                        if pid_str.isdigit():
+                            os.kill(int(pid_str), 1)  # SIGHUP
+            except Exception:
+                pass
 
-        archive_dir = self.cf.get_item("paths", "archive_folder", os.path.join(self.base_folder, "ArchiveFood"))
+        if shutil.which("rclone"):
+            try:
+                subprocess.run(["rclone", "rc", "vfs/refresh"], capture_output=True, timeout=1)
+            except Exception:
+                pass
+
+    def _find_oldest_photo_in_base_folder(self, refresh=True):
+        """Scans the main drive base folder for unprocessed image files (ignoring subfolders).
+        Returns the path to the oldest photo by modification time, or None if none found.
+        """
+        if refresh:
+            self._refresh_rclone_mount()
+
+        search_dir = self.base_folder
         try:
-            os.makedirs(archive_dir, exist_ok=True)
-        except Exception as e:
-            self.log_status(f"Warning: could not create archive dir {archive_dir}: {e}")
+            p_search = Path(search_dir)
+            if not p_search.is_dir():
+                return None
+            image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".heic"}
+            
+            # Allow up to 2 attempts with a brief pause if empty to allow FUSE to populate after SIGHUP
+            candidates = []
+            attempts = 2 if refresh else 1
+            for attempt in range(attempts):
+                candidates = []
+                for item in p_search.iterdir():
+                    try:
+                        if item.is_file() and item.suffix.lower() in image_extensions:
+                            candidates.append(item)
+                    except OSError:
+                        pass
+                if candidates or attempt == attempts - 1:
+                    break
+                time.sleep(0.3)
 
-        # Find candidate image files directly in search_dir (ignoring ArchiveFood subfolder)
-        image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff", ".heic"}
-        candidate_files = []
-        try:
-            for item in Path(search_dir).iterdir():
-                if item.is_file() and item.suffix.lower() in image_extensions:
-                    candidate_files.append(item)
+            if candidates:
+                oldest_photo = min(candidates, key=lambda p: (p.stat().st_mtime, p.name))
+                return str(oldest_photo.resolve())
         except Exception as e:
-            self.log_status(f"Error scanning directory {search_dir}: {e}")
+            self.log_status(f"Notice: base folder scan skipped: {e}")
+        return None
 
-        if candidate_files:
-            # Pick oldest photo based on modification time (st_mtime)
-            oldest_photo = min(candidate_files, key=lambda p: (p.stat().st_mtime, p.name))
-            file_path = str(oldest_photo.resolve())
-            self.log_status(f"Found oldest photo: {oldest_photo.name} ({len(candidate_files)} photos in folder)")
+    def _set_load_button_state(self, enabled=True):
+        """Sets the state of '1. Load' button: blue and active if enabled, greyed out if disabled."""
+        if not hasattr(self, "btn_import"):
+            return
+        if enabled:
+            self.btn_import.config(
+                state="normal",
+                bg="#2980B9",
+                fg="white",
+                activebackground="#3498DB",
+                activeforeground="white",
+                relief="raised"
+            )
+        else:
+            self.btn_import.config(
+                state="disabled",
+                bg="#BDC3C7",
+                fg="#7F8C8D",
+                disabledforeground="#7F8C8D",
+                relief="groove"
+            )
+
+    def _update_load_button_state(self):
+        """Updates '1. Load' button state based on whether a photo is currently loaded and unanalyzed."""
+        if not hasattr(self, "btn_import"):
+            return
+        if not (self.current_photo_path and Path(self.current_photo_path).is_file()):
+            self._set_load_button_state(enabled=True)
+            return
+        # If a photo is loaded and analysis is available (3. Record ready), ungrey Load
+        if self._has_analysis_to_record():
+            self._set_load_button_state(enabled=True)
+        else:
+            self._set_load_button_state(enabled=False)
+
+    def _set_analyze_button_state(self, enabled=True):
+        """Sets the state of '2. Analyze Photo' button: green and active if enabled, greyed out if disabled."""
+        if not hasattr(self, "btn_analyze"):
+            return
+        if enabled:
+            self.btn_analyze.config(
+                state="normal",
+                bg="#27AE60",
+                fg="white",
+                activebackground="#2ECC71",
+                activeforeground="white",
+                relief="raised"
+            )
+        else:
+            self.btn_analyze.config(
+                state="disabled",
+                bg="#BDC3C7",
+                fg="#7F8C8D",
+                disabledforeground="#7F8C8D",
+                relief="groove"
+            )
+
+    def _has_analysis_to_record(self):
+        """Returns True if there is analysis data available to record."""
+        if self.is_bill():
+            return bool(self.current_photo_path and Path(self.current_photo_path).is_file())
+        has_items = bool(getattr(self, "parsed_items", None) or (hasattr(self, "tree_items") and self.tree_items.get_children()))
+        return has_items
+
+    def _set_record_button_state(self, enabled=None, doc_type=None):
+        """Sets the state of Action Button 3 ('Record').
+        If enabled is None, computes whether analysis is available to record.
+        If doc_type is Bill or MonthlyBill, labels as 'Record to Monthly Bill'.
+        Otherwise labels as 'Record to Food'.
+        """
+        if not hasattr(self, "btn_record"):
+            return
+        is_bill = (doc_type in ("MonthlyBill", "Bill")) if doc_type is not None else self.is_bill()
+        label_text = "💾 3. Record to Monthly Bill" if is_bill else "💾 3. Record to Food"
+        if enabled is None:
+            enabled = self._has_analysis_to_record()
+
+        if enabled:
+            self.btn_record.config(
+                state="normal",
+                text=label_text,
+                bg="#8E44AD",
+                fg="white",
+                activebackground="#9B59B6",
+                activeforeground="white",
+                relief="raised"
+            )
+        else:
+            self.btn_record.config(
+                state="disabled",
+                text=label_text,
+                bg="#BDC3C7",
+                fg="#7F8C8D",
+                disabledforeground="#7F8C8D",
+                relief="groove"
+            )
+
+    def action_import_photo(self):
+        """Action Button 1: Picks the oldest photo from the main drive folder.
+        If no photos are found in the main folder, falls back to a file picker dialog.
+        If a photo is already loaded and analyzed, moves on by archiving it without recording.
+        """
+        if self.current_photo_path and Path(self.current_photo_path).is_file():
+            self.log_status(f"Moving on without recording: archiving {os.path.basename(self.current_photo_path)}...")
+            self.action_clear_all(archive_unrecorded=True)
+
+        self.log_status("Refreshing and scanning folder for new photos...")
+        self.master.update_idletasks()
+
+        file_path = self._find_oldest_photo_in_base_folder(refresh=True)
+        if file_path:
+            p = Path(file_path)
+            self.log_status(f"Found oldest photo: {p.name}")
         else:
             # Fallback if no images are in the folder: prompt file dialog
-            self.log_status(f"No photos found in {search_dir}. Opening file picker...")
-            last_dir = self.cf.get_item("paths", "last_photo_folder", search_dir)
-            if not Path(last_dir).exists():
-                last_dir = search_dir
+            self.log_status(f"No photos found in {self.base_folder}. Opening file picker...")
+            last_dir = self.cf.get_item("paths", "last_photo_folder", self.base_folder)
+            try:
+                if not Path(last_dir).exists():
+                    last_dir = self.base_folder
+            except OSError:
+                last_dir = self.base_folder
             file_path = filedialog.askopenfilename(
-                title="Import Photo (None found in base folder)",
+                title="Load Photo (None found in base folder)",
                 initialdir=last_dir,
                 filetypes=[
                     ("Image Files", "*.jpg *.jpeg *.png *.webp *.bmp *.gif *.tiff *.heic *.JPG *.JPEG *.PNG *.WEBP *.BMP *.GIF *.TIFF *.HEIC"),
@@ -1349,12 +1577,8 @@ class FoodAnalyzerApp:
                 ]
             )
             if not file_path:
-                self.log_status("Photo import cancelled.")
+                self.log_status("Photo load cancelled.")
                 return
-
-        self.current_photo_path = file_path
-        self.cf.put_item("paths", "last_photo", file_path)
-        self.cf.put_item("paths", "last_photo_folder", str(Path(file_path).parent))
 
         self.load_photo(file_path, auto_analyze=False)
 
@@ -1458,9 +1682,18 @@ class FoodAnalyzerApp:
         # Render photo on canvas
         self._render_photo_on_canvas(photo_path)
         self._highlight_clear_button(True)
+        self._update_load_button_state()
 
         # Detect and set document type ('Bill' or 'Food')
         self._detect_and_set_document_type(photo_path)
+
+        filename = os.path.basename(photo_path)
+        if not auto_analyze:
+            self.txt_analysis.delete("1.0", tk.END)
+            if self.is_bill():
+                self.txt_analysis.insert("1.0", f"File: {filename}\n\n[Identified as Monthly Bill]\n(Analysis bypassed; click '3. Record to Monthly Bill' to file to ArchiveMonthlyBill)")
+            else:
+                self.txt_analysis.insert("1.0", f"File: {filename}\n\n(Click '2. Analyze Photo' to extract OCR text)")
 
         if auto_analyze:
             self.action_analyze_photo()
@@ -1773,10 +2006,17 @@ class FoodAnalyzerApp:
         self.log_status(f"Running {doc_type} text analysis (OCR)...")
         self.master.update_idletasks()
 
-        if doc_type == "Bill":
+        if self.is_bill():
             self._analyze_bill_photo()
         else:
             self._analyze_food_photo()
+
+        # Grey out Analyze Photo button after analysis is complete
+        self._set_analyze_button_state(enabled=False)
+        # Enable Record button now that analysis is available
+        self._set_record_button_state(enabled=True)
+        # Ungrey Load button to allow moving on without recording the file analyzed
+        self._set_load_button_state(enabled=True)
 
     def _analyze_food_photo(self):
         """Analyzes food receipt and populates receipt form and items tree."""
@@ -1840,7 +2080,9 @@ class FoodAnalyzerApp:
         )
 
         # Show raw OCR summary in text area
+        filename = os.path.basename(self.current_photo_path) if self.current_photo_path else ""
         raw_text_display = [
+            f"File:               {filename}",
             "=== RECEIPT ANALYSIS BREAKDOWN ===",
             f"Individual:         {parsed['Individual']}",
             f"Payment:            {pay_formatted}",
@@ -2150,7 +2392,9 @@ class FoodAnalyzerApp:
         )
 
         # Show raw OCR summary in text area
+        filename = os.path.basename(self.current_photo_path) if self.current_photo_path else ""
         self.txt_analysis.delete("1.0", tk.END)
+        self.txt_analysis.insert(tk.END, f"File:             {filename}\n")
         self.txt_analysis.insert(tk.END, "=== MONTHLY BILL ANALYSIS (GNUCASH FORMAT) ===\n")
         self.txt_analysis.insert(tk.END, f"Statement Date:   {statement_date}\n")
         self.txt_analysis.insert(tk.END, f"Statement Period: {parsed.get('Statement Period', '')}\n")
@@ -2390,7 +2634,11 @@ class FoodAnalyzerApp:
             messagebox.showwarning("No Data", "Please import a photo and run analysis before recording.")
             return
 
-        if getattr(self, "current_doc_type", "Food") == "Bill":
+        if not self._has_analysis_to_record():
+            messagebox.showwarning("No Analysis", "Please click '2. Analyze Photo' to analyze receipt before recording.")
+            return
+
+        if getattr(self, "current_doc_type", "Food") in ("MonthlyBill", "Bill"):
             self._record_bill_to_excel()
         else:
             self._record_food_to_excel()
@@ -2601,6 +2849,13 @@ class FoodAnalyzerApp:
                 f"Photo Moved To: {photo_full_path}\n\n"
                 f"Workbook updated (Date, Time, Meal first)."
             )
+
+            # Auto-reload next photo from main drive folder; if none found, leave display blank
+            next_photo = self._find_oldest_photo_in_base_folder()
+            if next_photo:
+                self.load_photo(next_photo, auto_analyze=False)
+            else:
+                self.action_clear_all(archive_unrecorded=False)
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to write record to Excel:\n{e}")
             self.log_status(f"Excel save error: {e}")
@@ -2617,13 +2872,38 @@ class FoodAnalyzerApp:
 
         excel_target = Path(self.cf.get_item("paths", "bill_excel_path", os.path.join(self.base_folder, "TaylorBillRecords.xlsx"))).resolve()
 
-        # 1. Move photo to ArchiveMonthlyBill folder and update path
+        # 1. Determine destination filename with statement period date appended (e.g. _2026-10)
         archive_dir = Path(self.cf.get_item("paths", "archive_monthly_bill", os.path.join(self.base_folder, "ArchiveMonthlyBill"))).resolve()
         try:
             archive_dir.mkdir(parents=True, exist_ok=True)
             src_path = Path(self.current_photo_path).resolve()
             if src_path.is_file() and src_path.parent != archive_dir:
-                dest_path = archive_dir / src_path.name
+                # Extract statement period from OCR result if available
+                period_tag = ""
+                ocr_data = getattr(self, "_cached_ocr", None)
+                if ocr_data and ocr_data[0] == str(src_path) and ocr_data[1]:
+                    all_text = " ".join(t.strip() for _, t, _ in ocr_data[1])
+                    m = re.search(r"Statement\s*Period\s*[:\s]*(\d{1,2})[/-](\d{2,4})", all_text, re.IGNORECASE)
+                    if m:
+                        m_num = int(m.group(1))
+                        y_num = int(m.group(2))
+                        if y_num < 100:
+                            y_num += 2000
+                        period_tag = f"_{y_num:04d}-{m_num:02d}"
+
+                if not period_tag:
+                    d_str = self.entry_date.get().strip()
+                    ym = self._extract_year_month(d_str)
+                    if ym:
+                        period_tag = f"_{ym[0]:04d}-{ym[1]:02d}"
+
+                stem = src_path.stem
+                if period_tag and not stem.endswith(period_tag):
+                    dest_name = f"{stem}{period_tag}{src_path.suffix}"
+                else:
+                    dest_name = src_path.name
+
+                dest_path = archive_dir / dest_name
                 if dest_path.exists() and dest_path != src_path:
                     dest_path.unlink()
                 shutil.move(str(src_path), str(dest_path))
@@ -2662,7 +2942,17 @@ class FoodAnalyzerApp:
                     item["Date"] = self.entry_date.get().strip()
 
         if not items_to_save:
-            messagebox.showwarning("No Data", "No bill items to record.")
+            # When Analyze is bypassed/greyed out, simply file the photo in ArchiveMonthlyBill
+            self.log_status(f"Filed monthly bill photo in ArchiveMonthlyBill: {os.path.basename(self.current_photo_path)}")
+            messagebox.showinfo(
+                "Monthly Bill Filed",
+                f"Monthly Bill photo successfully filed to:\n{self.current_photo_path}"
+            )
+            next_photo = self._find_oldest_photo_in_base_folder()
+            if next_photo:
+                self.load_photo(next_photo, auto_analyze=False)
+            else:
+                self.action_clear_all(archive_unrecorded=False)
             return
 
         # Check if Excel file is open
@@ -2756,6 +3046,13 @@ class FoodAnalyzerApp:
             f"Photo Moved To:\n{self.current_photo_path}"
         )
 
+        # Auto-reload next photo from main drive folder; if none found, leave display blank
+        next_photo = self._find_oldest_photo_in_base_folder()
+        if next_photo:
+            self.load_photo(next_photo, auto_analyze=False)
+        else:
+            self.action_clear_all(archive_unrecorded=False)
+
     def _write_bill_rows_to_worksheet(self, ws, sheet_name, rows_data, headers):
         header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
         header_fill = PatternFill(start_color="1B4F72", end_color="1B4F72", fill_type="solid")
@@ -2817,35 +3114,40 @@ class FoodAnalyzerApp:
             col_letter = openpyxl.utils.get_column_letter(col[0].column)
             ws.column_dimensions[col_letter].width = max(max_len + 4, 14)
 
-    def action_clear_all(self):
+    def action_clear_all(self, archive_unrecorded=True):
         """Action Button 4: Clears the current photo, moves it to Archive (ArchiveFood or ArchiveMonthlyBill), and blanks the screen ready for next import."""
-        # 1. If an image is currently loaded, move it to appropriate Archive
-        if self.current_photo_path and Path(self.current_photo_path).is_file():
+        # 1. If an image is currently loaded and unrecorded, move it to appropriate Archive
+        if archive_unrecorded and self.current_photo_path and Path(self.current_photo_path).is_file():
             src_path = Path(self.current_photo_path).resolve()
-            if getattr(self, "current_doc_type", "Food") == "Bill":
-                target_archive = self.cf.get_item("paths", "archive_monthly_bill", os.path.join(self.base_folder, "ArchiveMonthlyBill"))
-                archive_name = "ArchiveMonthlyBill"
-            else:
-                target_archive = self.cf.get_item("paths", "archive_folder", os.path.join(self.base_folder, "ArchiveFood"))
-                archive_name = "ArchiveFood"
-            archive_dir = Path(target_archive).resolve()
-            try:
-                archive_dir.mkdir(parents=True, exist_ok=True)
-                if src_path.parent != archive_dir:
+            food_archive = Path(self.cf.get_item("paths", "archive_folder", os.path.join(self.base_folder, "ArchiveFood"))).resolve()
+            bill_archive = Path(self.cf.get_item("paths", "archive_monthly_bill", os.path.join(self.base_folder, "ArchiveMonthlyBill"))).resolve()
+            if src_path.parent != food_archive and src_path.parent != bill_archive:
+                if self.is_bill():
+                    target_archive = bill_archive
+                    archive_name = "ArchiveMonthlyBill"
+                else:
+                    target_archive = food_archive
+                    archive_name = "ArchiveFood"
+                archive_dir = Path(target_archive).resolve()
+                try:
+                    archive_dir.mkdir(parents=True, exist_ok=True)
                     dest_path = archive_dir / src_path.name
                     if dest_path.exists() and dest_path != src_path:
                         dest_path.unlink()
                     shutil.move(str(src_path), str(dest_path))
+                    self.cf.put_item("paths", "last_photo", str(dest_path))
                     self.log_status(f"Moved photo to {archive_name}: {dest_path.name}")
-            except Exception as e:
-                self.log_status(f"{archive_name} move warning: {e}")
+                except Exception as e:
+                    self.log_status(f"{archive_name} move warning: {e}")
 
         # 2. Blank the canvas / photo preview
         self.current_photo_path = ""
+        self.current_doc_type = "Food"
+        self._apply_document_type("Food")
         self._current_pil_image = None
         self.tk_photo_image = None
         self.image_canvas.delete("all")
-        self.photo_info_lbl.config(text="No photo loaded. Click '1. Import' above.")
+        self.photo_info_lbl.config(text="No photo loaded. Click '1. Load' above.")
 
         # 3. Clear all form fields
         self.entry_individual.delete(0, tk.END)
@@ -2864,9 +3166,11 @@ class FoodAnalyzerApp:
         self.lbl_items_summary.config(text="0 Items | Total: $0.00")
         self.txt_analysis.delete("1.0", tk.END)
 
-        # 5. Reset Clear button highlight and update folder status
+        # 5. Reset Clear button highlight, update load button, and update folder status
         self._highlight_clear_button(False)
         self._check_folder_and_file_status()
+        self._update_load_button_state()
+        self._set_record_button_state(enabled=False)
         self.log_status("Screen cleared and photo archived; ready for next import.")
 
 
